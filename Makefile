@@ -1,7 +1,7 @@
 # Makefile for CASPaxos Python Implementation
 
 # Python interpreter from virtual environment
-PYTHON := ../env/bin/python
+PYTHON := env/bin/python
 
 # Get the parent directory (where the virtual env is)
 ROOT_DIR := $(shell cd .. && pwd)
