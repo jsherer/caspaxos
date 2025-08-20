@@ -9,10 +9,18 @@ including basic operations, key-value storage, and compare-and-swap operations.
 import asyncio
 import random
 import time
+import sys
+import os
 from typing import Any, Optional
 
-# Import from the same package
-from .caspaxos import CASPaxos, KeyValueStore, CASKeyValue
+# Handle both module and script execution
+if __name__ == "__main__":
+    # When run as script, add parent to path
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from caspaxos.caspaxos import CASPaxos, KeyValueStore, CASKeyValue
+else:
+    # When imported as module
+    from .caspaxos import CASPaxos, KeyValueStore, CASKeyValue
 
 
 async def basic_example():

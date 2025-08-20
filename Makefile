@@ -1,10 +1,13 @@
 # Makefile for CASPaxos Python Implementation
 
 # Python interpreter from virtual environment
-PYTHON := /app/env/bin/python
+PYTHON := ../env/bin/python
 
-# Set PYTHONPATH to include the app directory
-export PYTHONPATH := /app
+# Get the parent directory (where the virtual env is)
+ROOT_DIR := $(shell cd .. && pwd)
+
+# Set PYTHONPATH to include the parent directory
+export PYTHONPATH := $(ROOT_DIR)
 
 # Default target
 .PHONY: help
@@ -79,7 +82,7 @@ test-caspaxos:
 example:
 	@echo "Running CASPaxos examples..."
 	@echo "================================"
-	@cd /app && $(PYTHON) -m caspaxos.caspaxos.example
+	@$(PYTHON) caspaxos/example.py
 
 # Alias for example
 .PHONY: demo
@@ -150,6 +153,8 @@ test-parallel:
 # Print the Python path for debugging
 .PHONY: debug-path
 debug-path:
+	@echo "Current directory: $$(pwd)"
+	@echo "Root directory: $(ROOT_DIR)"
 	@echo "Python: $(PYTHON)"
 	@echo "PYTHONPATH: $(PYTHONPATH)"
 	@$(PYTHON) --version
