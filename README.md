@@ -267,7 +267,7 @@ PYTHONPATH=/app env/bin/python -m caspaxos.caspaxos.example
 
 ## License
 
-MIT License - See LICENSE file for details
+See [LICENSE](LICENSE)
 
 ## Contributing
 
