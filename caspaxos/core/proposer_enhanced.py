@@ -108,7 +108,7 @@ class EnhancedProposer:
         return self.key_locks[key]
     
     def _next_ballot(self, key: str) -> BallotNumber:
-        """Generate the next ballot number for a key."""
+        """Generate a ballot above this key's locally issued and observed counters."""
         counter = self.ballot_counters.get(key, 0) + 1
         self.ballot_counters[key] = counter
         return BallotNumber(counter, self.node_id)
@@ -151,6 +151,10 @@ class EnhancedProposer:
                     promises.append(resp)
                 elif resp.is_conflict:
                     conflicts.append(resp)
+                    if resp.ballot is not None:
+                        self.ballot_counters[key] = max(
+                            self.ballot_counters.get(key, 0), resp.ballot.counter
+                        )
         
         # Check if we have quorum
         if len(promises) < self.quorum_size:
@@ -211,6 +215,10 @@ class EnhancedProposer:
                     accepts.append(resp)
                 elif resp.is_conflict:
                     conflicts.append(resp)
+                    if resp.ballot is not None:
+                        self.ballot_counters[key] = max(
+                            self.ballot_counters.get(key, 0), resp.ballot.counter
+                        )
         
         # Check if we have quorum
         if len(accepts) < self.quorum_size:

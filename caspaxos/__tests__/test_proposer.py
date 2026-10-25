@@ -384,3 +384,68 @@ class TestEnhancedProposer:
         )
         assert sorted(results) == [(False, "claimed"), (True, "claimed")]
         assert await proposer.read("key") == "claimed"
+
+    @pytest.mark.asyncio
+    async def test_takeover_advances_past_highest_conflicting_promise(self):
+        acceptors = [InMemoryAcceptor(str(i)) for i in range(3)]
+        incumbent = EnhancedProposer("incumbent", acceptors)
+        for value in range(1, 21):
+            await incumbent.write("counter", value)
+        for acceptor, counter in zip(acceptors, [100, 1000, 500]):
+            response = await acceptor.prepare(
+                PrepareRequest("counter", BallotNumber(counter, "z"))
+            )
+            assert response.is_prepared
+
+        newcomer = EnhancedProposer("new", acceptors, quorum_size=3)
+        # One rejected prepare must suffice to learn all observed frontiers,
+        # without losing the value accepted before those outstanding promises.
+        assert await newcomer.change("counter", lambda value: value + 1, retries=2) == 21
+        assert await newcomer.read("counter") == 21
+
+    @pytest.mark.asyncio
+    async def test_accept_conflict_advances_next_explicit_operation(self):
+        class PreemptingAcceptor(InMemoryAcceptor):
+            preempted = False
+
+            async def accept(self, request):
+                if request.ballot.node_id == "new" and not self.preempted:
+                    self.preempted = True
+                    await super().prepare(
+                        PrepareRequest(request.key, BallotNumber(1000, "z"))
+                    )
+                return await super().accept(request)
+
+        acceptors = [PreemptingAcceptor(str(i)) for i in range(3)]
+        await EnhancedProposer("incumbent", acceptors).write("counter", 7)
+        newcomer = EnhancedProposer("new", acceptors)
+        with pytest.raises(EnhancedProposerError) as error:
+            await newcomer.change("counter", lambda value: value + 1)
+        assert error.value.code == "INDETERMINATE"
+        # Accept conflicts still must not replay the failed update. They only
+        # advance the ballot for an operation explicitly requested by the caller.
+        assert await newcomer.change("counter", lambda value: value, retries=1) == 7
+
+    @pytest.mark.asyncio
+    async def test_successful_quorum_remembers_minority_conflicts(self):
+        class OfflineAcceptor(InMemoryAcceptor):
+            offline = False
+
+            async def prepare(self, request):
+                if self.offline:
+                    raise ConnectionError("offline")
+                return await super().prepare(request)
+
+            async def accept(self, request):
+                if self.offline:
+                    raise ConnectionError("offline")
+                return await super().accept(request)
+
+        acceptors = [OfflineAcceptor(str(i)) for i in range(3)]
+        await acceptors[2].prepare(PrepareRequest("counter", BallotNumber(1000, "z")))
+        proposer = EnhancedProposer("p", acceptors)
+        assert await proposer.change("counter", lambda _: 7, retries=1) == 7
+        # The next quorum now needs the replica whose high promise was already
+        # observed during the successful operation.
+        acceptors[0].offline = True
+        assert await proposer.change("counter", lambda value: value + 1, retries=1) == 8

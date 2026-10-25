@@ -319,6 +319,13 @@ confirmed, it raises `caspaxos.core.proposer_enhanced.ProposerError` with
 conflicts: other replicas may already have accepted the proposed value.
 A confirmed quorum still succeeds when a minority of responses are lost.
 
+The enhanced proposer remembers the highest conflicting ballot counter observed
+for each key during either phase, including minority conflicts in a successful
+quorum. Its next ballot exceeds that counter while retaining its own node ID.
+Prepare retries therefore jump past observed promises rather than counting up
+one at a time. Accept conflicts still report an indeterminate outcome; the
+remembered counter is used by the next explicitly requested operation.
+
 An indeterminate outcome does not mean the write failed. Recover with a
 consistent read and application-specific reconciliation rather than blindly
 repeating a non-idempotent update. Exactly-once retries require application-level
