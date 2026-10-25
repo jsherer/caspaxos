@@ -92,6 +92,13 @@ async def main():
 asyncio.run(main())
 ```
 
+For value-based CAS, `EnhancedProposer.compare_and_swap(key, expected, new_value)`
+returns `(matched, resulting_value)` after consensus. The boolean reports whether
+the current value matched `expected`, not whether the result equals `new_value`.
+A mismatched expectation returns `False` even if the replacement is already
+stored; a matching no-op returns `True`. Consensus failures still raise rather
+than reporting a comparison result.
+
 ## Architecture
 
 ### Core Components

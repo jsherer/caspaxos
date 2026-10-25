@@ -352,3 +352,35 @@ class TestEnhancedProposer:
         proposer = EnhancedProposer("p", acceptors)
         assert await proposer.change("counter", lambda value: (value or 0) + 1) == 1
         assert await proposer.read("counter") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "expected,replacement,success",
+        [
+            ("wrong", "current", False),
+            ("current", "current", True),
+            ("wrong", "different", False),
+        ],
+    )
+    async def test_compare_and_swap_reports_comparison(self, expected, replacement, success):
+        proposer = EnhancedProposer(
+            "p", [InMemoryAcceptor(str(i)) for i in range(3)]
+        )
+        await proposer.write("key", "current")
+        assert await proposer.compare_and_swap("key", expected, replacement) == (
+            success, "current"
+        )
+        assert await proposer.read("key") == "current"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_compare_and_swap_has_one_winner(self):
+        proposer = EnhancedProposer(
+            "p", [InMemoryAcceptor(str(i)) for i in range(3)]
+        )
+        await proposer.write("key", "available")
+        results = await asyncio.gather(
+            proposer.compare_and_swap("key", "available", "claimed"),
+            proposer.compare_and_swap("key", "available", "claimed"),
+        )
+        assert sorted(results) == [(False, "claimed"), (True, "claimed")]
+        assert await proposer.read("key") == "claimed"

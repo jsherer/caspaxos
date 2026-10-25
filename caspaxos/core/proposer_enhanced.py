@@ -334,10 +334,16 @@ class EnhancedProposer:
             new_value: The new value to set if expectation matches
             
         Returns:
-            Tuple of (success, actual_value)
+            Tuple of (matched, resulting_value). matched reports whether the
+            current value equaled expected, even when new_value already equals
+            the current value. A mismatch leaves the value unchanged.
         """
-        actual_value = await self.change(
-            key,
-            lambda v: new_value if v == expected else v
-        )
-        return (actual_value == new_value, actual_value)
+        matched = False
+
+        def update(current):
+            nonlocal matched
+            matched = bool(current == expected)
+            return new_value if matched else current
+
+        actual_value = await self.change(key, update)
+        return matched, actual_value
