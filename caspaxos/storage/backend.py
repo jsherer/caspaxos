@@ -28,7 +28,8 @@ class StorageBackend(ABC):
             key: The key to retrieve state for
             
         Returns:
-            The stored AcceptorState or None if not found
+            A detached snapshot of AcceptorState, or None if not found.
+            Mutating the returned ballots or value must not change stored state.
         """
         pass
     
@@ -36,6 +37,9 @@ class StorageBackend(ABC):
     async def set_state(self, key: str, state: AcceptorState) -> None:
         """
         Store or update the state for a given key.
+
+        Store an independent snapshot, including ballots and nested values;
+        subsequent caller mutations must not alter persisted state.
         
         Args:
             key: The key to store state for

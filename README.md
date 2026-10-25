@@ -244,6 +244,19 @@ PYTHONPATH=/app env/bin/python -m caspaxos.caspaxos.example
 - **Caching**: Proposers cache accepted values to avoid unnecessary prepare phases
 - **Quorum**: Default majority quorum (N/2 + 1) for N acceptors
 
+### Mutable Values
+
+Values must support `copy.deepcopy`, including independent copies of mutable
+contents. Update functions receive detached values and may mutate and return
+them. Both proposers snapshot the result before sending accept requests and
+return a separate copy, so later caller mutations cannot change a proposal,
+the proposer cache, or accepted state.
+
+The in-memory backend snapshots complete acceptor state on write and read,
+including ballots and nested values. Custom storage backends must provide the
+same ownership isolation. In `CASPaxos`, a callback that mutates its argument
+and then raises leaves the previous value unchanged.
+
 ### Failed or Cancelled Writes
 
 `CASPaxos` / `Proposer` discard the cached round before sending accept requests

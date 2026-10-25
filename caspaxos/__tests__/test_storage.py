@@ -202,3 +202,23 @@ class TestInMemoryStorage:
         
         assert await storage.get_state("key1") is None
         assert await storage.get_state("key2") is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("boundary", ["write", "read"])
+    async def test_state_snapshot_isolates_values_and_ballots(self, boundary):
+        storage = InMemoryStorage()
+        state = AcceptorState(
+            promised_ballot=BallotNumber(2, "p"),
+            accepted_ballot=BallotNumber(1, "p"),
+            accepted_value={"items": [1]},
+        )
+        await storage.set_state("key", state)
+        exposed = state if boundary == "write" else await storage.get_state("key")
+        exposed.promised_ballot.counter = 100
+        exposed.accepted_ballot.counter = 99
+        exposed.accepted_value["items"].append(2)
+
+        stored = await storage.get_state("key")
+        assert stored.promised_ballot == BallotNumber(2, "p")
+        assert stored.accepted_ballot == BallotNumber(1, "p")
+        assert stored.accepted_value == {"items": [1]}

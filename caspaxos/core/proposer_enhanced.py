@@ -6,6 +6,7 @@ accessed through a transport layer.
 """
 
 import asyncio
+from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from .ballot import BallotNumber
 from .messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
@@ -236,7 +237,8 @@ class EnhancedProposer:
                     _, current_value = await self._prepare_phase(key, ballot)
                     
                     # Apply update function
-                    new_value = update_fn(current_value)
+                    # Snapshot the result before accept requests can yield.
+                    new_value = deepcopy(update_fn(current_value))
                     
                     # Phase 2: Accept
                     await self._accept_phase(key, ballot, new_value)
@@ -244,7 +246,7 @@ class EnhancedProposer:
                     # Cache the value for optimization
                     self.value_cache[key] = (ballot, new_value)
                     
-                    return new_value
+                    return deepcopy(new_value)
                     
                 except ProposerError as e:
                     last_error = e

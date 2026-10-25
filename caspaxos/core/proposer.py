@@ -6,6 +6,7 @@ prepare and accept phases to achieve consensus on values.
 """
 
 import asyncio
+from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .ballot import BallotNumber
 from .messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
@@ -109,10 +110,13 @@ class Proposer:
                 new_value = None
                 update_error = None
                 try:
-                    new_value = update_fn(current_value)
+                    new_value = update_fn(deepcopy(current_value))
                 except Exception as e:
                     update_error = e
                     new_value = current_value  # Keep current value on error
+
+                # Detach caller-owned values before accept requests can yield.
+                new_value = deepcopy(new_value)
                 
                 # Get promise ballot for next round
                 promise = ballot.next()
@@ -127,7 +131,7 @@ class Proposer:
                 if update_error:
                     raise ProposerError("UpdateError", str(update_error))
                 
-                return new_value
+                return deepcopy(new_value)
                 
             except ProposerError:
                 raise

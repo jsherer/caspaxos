@@ -6,6 +6,7 @@ It's suitable for testing, development, and single-node deployments.
 """
 
 import asyncio
+from copy import deepcopy
 from typing import Dict, List, Optional
 from ..backend import StorageBackend
 from ..acceptor import AcceptorState
@@ -39,21 +40,21 @@ class InMemoryStorage(StorageBackend):
             key: The key to retrieve state for
             
         Returns:
-            The stored AcceptorState or None if not found
+            A detached snapshot of AcceptorState, or None if not found
         """
         async with self._get_lock(key):
-            return self.states.get(key)
+            return deepcopy(self.states.get(key))
     
     async def set_state(self, key: str, state: AcceptorState) -> None:
         """
-        Store or update the state for a given key.
+        Store an independent snapshot of the state for a given key.
         
         Args:
             key: The key to store state for
             state: The AcceptorState to store
         """
         async with self._get_lock(key):
-            self.states[key] = state
+            self.states[key] = deepcopy(state)
     
     async def delete_state(self, key: str) -> None:
         """

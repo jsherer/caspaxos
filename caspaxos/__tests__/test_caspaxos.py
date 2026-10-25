@@ -97,6 +97,53 @@ class TestCASPaxos:
         # Value should remain unchanged
         assert await paxos.get("key1") == "initial"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "boundary", ["input", "put_result", "get_result", "callback_argument"]
+    )
+    async def test_value_snapshots_isolate_callers_from_consensus(self, boundary):
+        paxos = CASPaxos()
+        original = {"items": [1]}
+        result = await paxos.put("key", original)
+        if boundary == "input":
+            exposed = original
+        elif boundary == "put_result":
+            exposed = result
+        elif boundary == "get_result":
+            exposed = await paxos.get("key")
+        else:
+            captured = []
+
+            def capture(current):
+                captured.append(current)
+                return current
+
+            await paxos.change("key", capture)
+            exposed = captured[0]
+
+        exposed["items"].append(2)
+        for acceptor in paxos.acceptors:
+            state = await acceptor.get_state("key")
+            assert state.accepted_value == {"items": [1]}
+        # A storage-only fix must not leave the proposer's fast path aliased.
+        assert await paxos.get("key") == {"items": [1]}
+
+    @pytest.mark.asyncio
+    async def test_mutating_update_error_preserves_previous_value(self):
+        paxos = CASPaxos()
+        await paxos.put("key", {"items": [1]})
+
+        def bad_update(current):
+            current["items"].append(2)
+            raise ValueError("update rejected")
+
+        with pytest.raises(ProposerError) as error:
+            await paxos.change("key", bad_update)
+        assert error.value.code == "UpdateError"
+        assert await paxos.get("key") == {"items": [1]}
+        for acceptor in paxos.acceptors:
+            assert (await acceptor.get_state("key")).accepted_value == {"items": [1]}
+
 
 class TestKeyValueStore:
     """Test suite for KeyValueStore."""

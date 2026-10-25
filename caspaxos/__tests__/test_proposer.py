@@ -5,6 +5,7 @@ import asyncio
 from ..core import Proposer, ProposerError, InsufficientQuorumError
 from ..core.ballot import BallotNumber
 from ..storage.memory import InMemoryAcceptor
+from ..core.proposer_enhanced import EnhancedProposer
 
 
 class TestProposer:
@@ -259,3 +260,30 @@ class TestProposer:
         else:
             pytest.fail("reader could not acquire a ballot")
         assert value == "second"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("proposer_type", [Proposer, EnhancedProposer])
+    async def test_proposal_snapshot_precedes_accept_io(self, proposer_type):
+        accepting = asyncio.Event()
+        release = asyncio.Event()
+
+        class DelayedAcceptor(InMemoryAcceptor):
+            async def accept(self, request):
+                accepting.set()
+                await release.wait()
+                return await super().accept(request)
+
+        acceptors = [DelayedAcceptor(str(i)) for i in range(3)]
+        proposer = proposer_type("p", acceptors)
+        original = {"items": [1]}
+        pending = asyncio.create_task(proposer.change("key", lambda _: original))
+        try:
+            await asyncio.wait_for(accepting.wait(), 1)
+            original["items"].append(2)
+            release.set()
+            assert await pending == {"items": [1]}
+            for acceptor in acceptors:
+                assert (await acceptor.get_state("key")).accepted_value == {"items": [1]}
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)
