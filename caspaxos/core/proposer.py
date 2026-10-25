@@ -207,6 +207,10 @@ class Proposer:
         Raises:
             ProposerError: If accept phase fails
         """
+        # An accept may persist even if its response is lost or cancelled.
+        # change() restores the cache only after a successful quorum.
+        self.cache.pop(key, None)
+
         # Send accept requests to all acceptors
         accept_requests = [
             acceptor.accept(AcceptRequest(key, ballot, value, promise, extra))
@@ -223,7 +227,6 @@ class Proposer:
             # Check for conflicts and fast-forward ballot if needed
             for response in e.responses:
                 if hasattr(response, 'is_conflict') and response.is_conflict and response.ballot:
-                    self.cache.pop(key, None)  # Invalidate cache
                     self.ballot.fastforward_after(response.ballot)
             raise ProposerError("CommitError", "Failed to reach consensus")
     

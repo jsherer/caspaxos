@@ -244,6 +244,17 @@ PYTHONPATH=/app env/bin/python -m caspaxos.caspaxos.example
 - **Caching**: Proposers cache accepted values to avoid unnecessary prepare phases
 - **Quorum**: Default majority quorum (N/2 + 1) for N acceptors
 
+### Failed or Cancelled Writes
+
+`CASPaxos` / `Proposer` discard the cached round before sending accept requests
+and restore the cache only after a quorum succeeds. If acceptance fails or the
+operation is cancelled, the next operation runs a fresh prepare phase instead
+of reusing the uncertain round's ballot for a different value.
+
+A failed or cancelled write may already have reached some acceptors; it is not
+a rollback guarantee. Retrying a non-idempotent update is not guaranteed to
+apply it exactly once.
+
 ### Limitations
 
 - **Single Machine**: Current implementation runs on a single machine

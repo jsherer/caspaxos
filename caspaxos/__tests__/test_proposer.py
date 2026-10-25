@@ -206,3 +206,56 @@ class TestProposer:
         finally:
             release.set()
             await asyncio.gather(pending, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["connection_error", "cancellation"])
+    async def test_partial_accept_retry_preserves_acknowledged_write(self, failure):
+        accepted = asyncio.Event()
+        blocked = asyncio.Event()
+
+        class FaultAcceptor(InMemoryAcceptor):
+            fail = False
+
+            async def accept(self, request):
+                if self.fail:
+                    if failure == "cancellation":
+                        await blocked.wait()
+                    raise OSError("connection lost")
+                response = await super().accept(request)
+                accepted.set()
+                return response
+
+        acceptors = [FaultAcceptor(str(i)) for i in range(3)]
+        proposer = Proposer("p", acceptors)
+        acceptors[1].fail = acceptors[2].fail = True
+        pending = asyncio.create_task(proposer.change("key", lambda _: "first"))
+        try:
+            await asyncio.wait_for(accepted.wait(), 1)
+            if failure == "cancellation":
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            else:
+                with pytest.raises(ProposerError) as error:
+                    await pending
+                assert error.value.code == "CommitError"
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+        acceptors[1].fail = acceptors[2].fail = False
+        assert await proposer.change("key", lambda _: "second") == "second"
+
+        # A fresh proposer must recover the acknowledged value, not the
+        # minority's earlier value from an ambiguously completed operation.
+        reader = Proposer("z", acceptors)
+        for _ in range(3):
+            try:
+                value = await reader.change("key", lambda value: value)
+                break
+            except ProposerError:
+                continue
+        else:
+            pytest.fail("reader could not acquire a ballot")
+        assert value == "second"
