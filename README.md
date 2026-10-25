@@ -285,6 +285,18 @@ A failed or cancelled write may already have reached some acceptors; it is not
 a rollback guarantee. Retrying a non-idempotent update is not guaranteed to
 apply it exactly once.
 
+`EnhancedProposer.change(..., retries=10)` retries only preparation, before
+applying the update or sending accept requests. If an accept quorum cannot be
+confirmed, it raises `caspaxos.core.proposer_enhanced.ProposerError` with
+`code == "INDETERMINATE"` and does not reapply the update. This includes accept
+conflicts: other replicas may already have accepted the proposed value.
+A confirmed quorum still succeeds when a minority of responses are lost.
+
+An indeterminate outcome does not mean the write failed. Recover with a
+consistent read and application-specific reconciliation rather than blindly
+repeating a non-idempotent update. Exactly-once retries require application-level
+deduplication.
+
 ### Limitations
 
 - **Single Machine**: Current implementation runs on a single machine

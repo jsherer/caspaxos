@@ -5,7 +5,8 @@ import asyncio
 from ..core import Proposer, ProposerError, InsufficientQuorumError
 from ..core.ballot import BallotNumber
 from ..storage.memory import InMemoryAcceptor
-from ..core.proposer_enhanced import EnhancedProposer
+from ..core.messages import PrepareRequest
+from ..core.proposer_enhanced import EnhancedProposer, ProposerError as EnhancedProposerError
 
 
 class TestProposer:
@@ -287,3 +288,67 @@ class TestProposer:
         finally:
             release.set()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+class TestEnhancedProposer:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure", ["lost_quorum", "partial_accept", "conflict", "minority_loss"]
+    )
+    async def test_uncertain_accept_does_not_reapply_update(self, failure):
+        class FaultAcceptor(InMemoryAcceptor):
+            first_accept = True
+
+            async def accept(self, request):
+                if not self.first_accept:
+                    return await super().accept(request)
+                self.first_accept = False
+                if failure == "partial_accept" and self.node_id != "0":
+                    raise ConnectionError("request lost before persistence")
+                if failure == "conflict" and self.node_id == "2":
+                    await super().prepare(
+                        PrepareRequest(request.key, BallotNumber(2, "z"))
+                    )
+                    return await super().accept(request)
+                response = await super().accept(request)
+                if (
+                    failure == "conflict"
+                    or (failure == "lost_quorum" and self.node_id != "0")
+                    or (failure == "minority_loss" and self.node_id == "2")
+                ):
+                    raise ConnectionError("reply lost after persistence")
+                return response
+
+        acceptors = [FaultAcceptor(str(i)) for i in range(3)]
+        proposer = EnhancedProposer("p", acceptors)
+        if failure == "minority_loss":
+            assert await proposer.change("counter", lambda value: (value or 0) + 1) == 1
+        else:
+            with pytest.raises(EnhancedProposerError) as error:
+                await proposer.change("counter", lambda value: (value or 0) + 1)
+            assert error.value.code == "INDETERMINATE"
+
+        # Explicit recovery reads may adopt an uncertain write, but must never
+        # discover two increments from this single client operation.
+        assert await proposer.read("counter") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["connection_error", "conflict"])
+    async def test_prepare_failures_remain_retryable(self, failure):
+        class FaultAcceptor(InMemoryAcceptor):
+            first_prepare = True
+
+            async def prepare(self, request):
+                if self.first_prepare:
+                    self.first_prepare = False
+                    if failure == "connection_error":
+                        raise ConnectionError("prepare unavailable")
+                    await super().prepare(
+                        PrepareRequest(request.key, BallotNumber(1, "z"))
+                    )
+                return await super().prepare(request)
+
+        acceptors = [FaultAcceptor(str(i)) for i in range(3)]
+        proposer = EnhancedProposer("p", acceptors)
+        assert await proposer.change("counter", lambda value: (value or 0) + 1) == 1
+        assert await proposer.read("counter") == 1

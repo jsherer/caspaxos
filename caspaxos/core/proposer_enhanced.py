@@ -196,7 +196,7 @@ class EnhancedProposer:
         
         # Check if we have quorum
         if len(accepts) < self.quorum_size:
-            # If we have conflicts, we need to retry
+            # A conflict does not rule out acceptance by other replicas.
             if conflicts:
                 highest_conflict = max(conflicts, key=lambda r: r.ballot)
                 raise ProposerError(
@@ -217,13 +217,15 @@ class EnhancedProposer:
         Args:
             key: The key to update
             update_fn: Function that takes current value and returns new value
-            retries: Maximum number of retry attempts
+            retries: Maximum number of prepare attempts
             
         Returns:
             The new value after successful consensus
             
         Raises:
-            ProposerError: If consensus cannot be reached
+            ProposerError: If preparation fails, or with code INDETERMINATE
+                when an accept quorum cannot be confirmed. The update may
+                already have been applied and is not automatically retried.
         """
         async with self._get_lock(key):
             last_error = None
@@ -236,18 +238,6 @@ class EnhancedProposer:
                     # Phase 1: Prepare
                     _, current_value = await self._prepare_phase(key, ballot)
                     
-                    # Apply update function
-                    # Snapshot the result before accept requests can yield.
-                    new_value = deepcopy(update_fn(current_value))
-                    
-                    # Phase 2: Accept
-                    await self._accept_phase(key, ballot, new_value)
-                    
-                    # Cache the value for optimization
-                    self.value_cache[key] = (ballot, new_value)
-                    
-                    return deepcopy(new_value)
-                    
                 except ProposerError as e:
                     last_error = e
                     if e.code == "CONFLICT":
@@ -257,9 +247,26 @@ class EnhancedProposer:
                     raise
                 except InsufficientQuorumError as e:
                     last_error = e
-                    # Network issues, might recover
+                    # Prepare failures are safe to retry: no update was proposed.
                     await asyncio.sleep(0.1)
                     continue
+
+                # Apply the update only after preparation succeeds, outside the
+                # retry handlers. Snapshot it before accept requests can yield.
+                new_value = deepcopy(update_fn(current_value))
+
+                try:
+                    await self._accept_phase(key, ballot, new_value)
+                except (ProposerError, InsufficientQuorumError) as e:
+                    # Lost replies and conflicts can both hide accepted values.
+                    # Reapplying update_fn to recovered state could apply it twice.
+                    raise ProposerError(
+                        "INDETERMINATE",
+                        "Accept quorum was not confirmed; the update may have been applied",
+                    ) from e
+
+                self.value_cache[key] = (ballot, new_value)
+                return deepcopy(new_value)
             
             # Exhausted retries
             raise ProposerError(
