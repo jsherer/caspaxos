@@ -7,8 +7,8 @@ It's suitable for testing, development, and single-node deployments.
 
 import asyncio
 from copy import deepcopy
-from typing import Dict, List, Optional
-from ..backend import StorageBackend
+from typing import Callable, Dict, List, Optional, Tuple
+from ..backend import Result, StorageBackend
 from ..acceptor import AcceptorState
 
 
@@ -16,7 +16,7 @@ class InMemoryStorage(StorageBackend):
     """
     In-memory implementation of the storage backend.
     
-    Uses dictionaries to store state with per-key locking for thread safety.
+    Uses dictionaries with per-key locking for concurrent asyncio operations.
     All data is lost when the process terminates.
     """
     
@@ -56,6 +56,18 @@ class InMemoryStorage(StorageBackend):
         async with self._get_lock(key):
             self.states[key] = deepcopy(state)
     
+    async def update_state(
+        self,
+        key: str,
+        transition: Callable[[Optional[AcceptorState]], Tuple[Optional[AcceptorState], Result]],
+    ) -> Result:
+        """Apply a transition while holding the key's lock through persistence."""
+        async with self._get_lock(key):
+            state, result = transition(deepcopy(self.states.get(key)))
+            if state is not None:
+                self.states[key] = deepcopy(state)
+            return result
+
     async def delete_state(self, key: str) -> None:
         """
         Delete the state for a given key.
@@ -65,9 +77,6 @@ class InMemoryStorage(StorageBackend):
         """
         async with self._get_lock(key):
             self.states.pop(key, None)
-            # Also clean up the lock if no longer needed
-            if key in self.locks and key not in self.states:
-                del self.locks[key]
     
     async def list_keys(self) -> List[str]:
         """
@@ -81,8 +90,7 @@ class InMemoryStorage(StorageBackend):
     
     async def clear(self) -> None:
         """
-        Clear all stored state and locks.
+        Clear all stored state, retaining locks for any queued operations.
         """
         async with self.global_lock:
             self.states.clear()
-            self.locks.clear()

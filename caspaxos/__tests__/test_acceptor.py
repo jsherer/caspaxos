@@ -6,6 +6,8 @@ from ..core.ballot import BallotNumber
 from ..core.messages import PrepareRequest, AcceptRequest
 from ..storage.memory import InMemoryAcceptor
 from ..storage.acceptor import AcceptorState
+from ..acceptor import BaseAcceptor
+from ..storage.backends.memory import InMemoryStorage
 
 
 class TestInMemoryAcceptor:
@@ -203,3 +205,79 @@ class TestInMemoryAcceptor:
         prep_req2 = PrepareRequest("key1", BallotNumber(1, "node1"))
         response = await acceptor.prepare(prep_req2)
         assert response.is_prepared
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acceptor_type", [BaseAcceptor, InMemoryAcceptor])
+@pytest.mark.parametrize("older_operation", ["prepare", "accept"])
+async def test_atomic_transition_preserves_newer_accept(acceptor_type, older_operation):
+    writing = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedStorage(InMemoryStorage):
+        """Model an async backend whose writes can be delayed before persistence."""
+
+        def __init__(self):
+            super().__init__()
+            self.transactions = {}
+
+        async def set_state(self, key, state):
+            if key == "key" and state.promised_ballot.node_id == "old":
+                writing.set()
+                await release.wait()
+            await super().set_state(key, state)
+
+        async def update_state(self, key, transition):
+            # A backend transaction must span the read, decision, and async write.
+            lock = self.transactions.setdefault(key, asyncio.Lock())
+            async with lock:
+                state, result = transition(await self.get_state(key))
+                if state is not None:
+                    await self.set_state(key, state)
+                return result
+
+    storage = DelayedStorage()
+    first = acceptor_type("replica")
+    second = acceptor_type("replica")
+    first.storage = second.storage = storage
+    if older_operation == "prepare":
+        request = first.prepare(PrepareRequest("key", BallotNumber(1, "old")))
+    else:
+        request = first.accept(
+            AcceptRequest("key", BallotNumber(1, "old"), "old", BallotNumber(2, "old"))
+        )
+    pending = asyncio.create_task(request)
+    competing = None
+
+    async def commit_newer():
+        prepared = await second.prepare(PrepareRequest("key", BallotNumber(3, "new")))
+        assert prepared.is_prepared
+        accepted = await second.accept(
+            AcceptRequest("key", BallotNumber(3, "new"), "new", BallotNumber(4, "new"))
+        )
+        assert accepted.is_ok
+
+    try:
+        await asyncio.wait_for(writing.wait(), 1)
+        competing = asyncio.create_task(commit_newer())
+        # Run the competitor until it either completes or waits for the transaction.
+        await asyncio.sleep(0)
+        # A stalled key must not hold a backend-wide lock.
+        other = await asyncio.wait_for(
+            second.prepare(PrepareRequest("other", BallotNumber(1, "other"))), 1
+        )
+        assert other.is_prepared
+        release.set()
+        await asyncio.wait_for(asyncio.gather(pending, competing), 1)
+
+        state = await storage.get_state("key")
+        assert state.promised_ballot == BallotNumber(4, "new")
+        assert state.accepted_ballot == BallotNumber(3, "new")
+        assert state.accepted_value == "new"
+    finally:
+        release.set()
+        tasks = [pending] + ([competing] if competing is not None else [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

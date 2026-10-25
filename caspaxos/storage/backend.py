@@ -6,8 +6,11 @@ different persistence mechanisms (in-memory, Redis, PostgreSQL, etc).
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple, TypeVar
 from .acceptor import AcceptorState
+
+
+Result = TypeVar("Result")
 
 
 class StorageBackend(ABC):
@@ -47,6 +50,27 @@ class StorageBackend(ABC):
         """
         pass
     
+    @abstractmethod
+    async def update_state(
+        self,
+        key: str,
+        transition: Callable[[Optional[AcceptorState]], Tuple[Optional[AcceptorState], Result]],
+    ) -> Result:
+        """
+        Atomically read, transform, and persist state for one key.
+
+        The synchronous transition receives a detached snapshot (or None) and
+        returns (replacement, result). A None replacement means no write.
+        Exceptions from the transition must leave stored state unchanged.
+        Persist a detached snapshot before returning the result.
+
+        Serialize the entire operation against other writes to this key,
+        including calls from other acceptors sharing the same stored state.
+        Persistent backends must enforce this with a transaction or equivalent
+        conditional update, not separate get_state/set_state calls.
+        """
+        pass
+
     @abstractmethod
     async def delete_state(self, key: str) -> None:
         """

@@ -257,6 +257,23 @@ including ballots and nested values. Custom storage backends must provide the
 same ownership isolation. In `CASPaxos`, a callback that mutates its argument
 and then raises leaves the previous value unchanged.
 
+### Atomic Acceptor Transitions
+
+Both acceptor implementations use `StorageBackend.update_state(key, transition)`
+to read state, evaluate the protocol rule, and persist the result atomically.
+The synchronous transition receives a detached state snapshot and returns
+`(replacement, result)`; a `None` replacement means no write. A transition that
+raises must leave stored state unchanged.
+
+Custom backends must implement this operation and serialize it against other
+writes to the same stored key, including access through multiple acceptors.
+Separate `get_state` and `set_state` calls are not an atomic transition.
+Persistent backends need a transaction or equivalent conditional update.
+
+The in-memory backend holds a per-key asyncio lock across the transition and
+snapshot write; unrelated keys remain independent. Locks are retained across
+deletion and clearing so queued operations keep using the same lock.
+
 ### Failed or Cancelled Writes
 
 `CASPaxos` / `Proposer` discard the cached round before sending accept requests

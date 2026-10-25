@@ -5,7 +5,7 @@ This module provides the BaseAcceptor class that combines the pure
 protocol logic with a pluggable storage backend.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 from .core.acceptor_logic import AcceptorLogic
 from .core.messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
 from .storage.backend import StorageBackend
@@ -51,17 +51,13 @@ class BaseAcceptor(Acceptor):
         Returns:
             PrepareResponse with result
         """
-        # Get current state from storage
-        current_state = await self.storage.get_state(request.key)
-        
-        # Apply protocol logic
-        state_update, response = self.logic.process_prepare(current_state, request)
-        
-        # Update storage if needed
-        if state_update.should_update:
-            await self.storage.set_state(request.key, state_update.state)
-        
-        return response
+        def transition(
+            current_state: Optional[AcceptorState],
+        ) -> Tuple[Optional[AcceptorState], PrepareResponse]:
+            update, response = self.logic.process_prepare(current_state, request)
+            return (update.state if update.should_update else None), response
+
+        return await self.storage.update_state(request.key, transition)
     
     async def accept(self, request: AcceptRequest) -> AcceptResponse:
         """
@@ -76,17 +72,13 @@ class BaseAcceptor(Acceptor):
         Returns:
             AcceptResponse with result
         """
-        # Get current state from storage
-        current_state = await self.storage.get_state(request.key)
-        
-        # Apply protocol logic
-        state_update, response = self.logic.process_accept(current_state, request)
-        
-        # Update storage if needed
-        if state_update.should_update:
-            await self.storage.set_state(request.key, state_update.state)
-        
-        return response
+        def transition(
+            current_state: Optional[AcceptorState],
+        ) -> Tuple[Optional[AcceptorState], AcceptResponse]:
+            update, response = self.logic.process_accept(current_state, request)
+            return (update.state if update.should_update else None), response
+
+        return await self.storage.update_state(request.key, transition)
     
     async def get_state(self, key: str) -> Optional[AcceptorState]:
         """

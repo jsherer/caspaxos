@@ -9,7 +9,7 @@ BaseAcceptor with InMemoryStorage backend.
 """
 
 import asyncio
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from .acceptor import Acceptor, AcceptorState
 from .backends.memory import InMemoryStorage
 from ..core.ballot import BallotNumber
@@ -21,7 +21,7 @@ class InMemoryAcceptor(Acceptor):
     """
     In-memory implementation of a CASPaxos acceptor.
     
-    Thread-safe through the use of asyncio locks per key.
+    Serializes protocol transitions per key through the storage backend.
     
     Note: This class is maintained for backward compatibility.
     New code should use BaseAcceptor with InMemoryStorage.
@@ -50,17 +50,13 @@ class InMemoryAcceptor(Acceptor):
         Returns:
             PrepareResponse with result
         """
-        # Get current state from storage
-        state = await self.storage.get_state(request.key)
-        
-        # Process using pure logic
-        update, response = self.logic.process_prepare(state, request)
-        
-        # Apply state update if needed
-        if update and update.should_update:
-            await self.storage.set_state(request.key, update.state)
-        
-        return response
+        def transition(
+            state: Optional[AcceptorState],
+        ) -> Tuple[Optional[AcceptorState], PrepareResponse]:
+            update, response = self.logic.process_prepare(state, request)
+            return (update.state if update.should_update else None), response
+
+        return await self.storage.update_state(request.key, transition)
     
     async def accept(self, request: AcceptRequest) -> AcceptResponse:
         """
@@ -74,17 +70,13 @@ class InMemoryAcceptor(Acceptor):
         Returns:
             AcceptResponse with result
         """
-        # Get current state from storage
-        state = await self.storage.get_state(request.key)
-        
-        # Process using pure logic
-        update, response = self.logic.process_accept(state, request)
-        
-        # Apply state update if needed
-        if update and update.should_update:
-            await self.storage.set_state(request.key, update.state)
-        
-        return response
+        def transition(
+            state: Optional[AcceptorState],
+        ) -> Tuple[Optional[AcceptorState], AcceptResponse]:
+            update, response = self.logic.process_accept(state, request)
+            return (update.state if update.should_update else None), response
+
+        return await self.storage.update_state(request.key, transition)
     
     async def get_state(self, key: str) -> Optional[AcceptorState]:
         """

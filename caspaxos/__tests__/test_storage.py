@@ -133,27 +133,21 @@ class TestInMemoryStorage:
     
     @pytest.mark.asyncio
     async def test_concurrent_access(self):
-        """Test that concurrent access to same key is safe."""
+        """Atomic updates preserve every concurrent increment."""
         import asyncio
         
         storage = InMemoryStorage()
         
         async def increment_ballot(key: str, node_id: str):
-            """Increment the promised ballot."""
-            for i in range(10):
-                state = await storage.get_state(key)
-                if state is None:
-                    state = AcceptorState.initial()
-                
-                # Increment ballot
-                new_ballot = BallotNumber(
-                    state.promised_ballot.counter + 1,
-                    node_id
-                )
-                state.promised_ballot = new_ballot
-                
-                await storage.set_state(key, state)
-                await asyncio.sleep(0.001)  # Small delay to encourage interleaving
+            def increment(state):
+                state = state or AcceptorState.initial()
+                state.promised_ballot = state.promised_ballot.increment()
+                state.promised_ballot.node_id = node_id
+                return state, state.promised_ballot.counter
+
+            for _ in range(10):
+                await storage.update_state(key, increment)
+                await asyncio.sleep(0)
         
         # Run concurrent updates
         await asyncio.gather(
@@ -221,4 +215,47 @@ class TestInMemoryStorage:
         stored = await storage.get_state("key")
         assert stored.promised_ballot == BallotNumber(2, "p")
         assert stored.accepted_ballot == BallotNumber(1, "p")
+        assert stored.accepted_value == {"items": [1]}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["exception", "no_update"])
+    async def test_atomic_update_preserves_state_when_not_committed(self, outcome):
+        storage = InMemoryStorage()
+        await storage.set_state(
+            "key",
+            AcceptorState(BallotNumber(2, "p"), BallotNumber(1, "p"), {"items": [1]}),
+        )
+
+        def reject(state):
+            state.promised_ballot.counter = 99
+            state.accepted_value["items"].append(2)
+            if outcome == "exception":
+                raise ValueError("rejected")
+            return None, "rejected"
+
+        if outcome == "exception":
+            with pytest.raises(ValueError, match="rejected"):
+                await storage.update_state("key", reject)
+        else:
+            assert await storage.update_state("key", reject) == "rejected"
+        stored = await storage.get_state("key")
+        assert stored.promised_ballot == BallotNumber(2, "p")
+        assert stored.accepted_ballot == BallotNumber(1, "p")
+        assert stored.accepted_value == {"items": [1]}
+
+    @pytest.mark.asyncio
+    async def test_atomic_update_isolates_committed_state_from_result(self):
+        storage = InMemoryStorage()
+
+        def initialize(state):
+            state = AcceptorState(
+                BallotNumber(2, "p"), BallotNumber(1, "p"), {"items": [1]}
+            )
+            return state, state
+
+        result = await storage.update_state("key", initialize)
+        result.promised_ballot.counter = 99
+        result.accepted_value["items"].append(2)
+        stored = await storage.get_state("key")
+        assert stored.promised_ballot == BallotNumber(2, "p")
         assert stored.accepted_value == {"items": [1]}
