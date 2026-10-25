@@ -7,9 +7,10 @@ implementations built on top of the consensus protocol.
 
 import asyncio
 import json
-from typing import Any, Callable, Dict, List, Optional, Union
-from .core import Proposer, BallotNumber
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from .core import Proposer
 from .storage import InMemoryAcceptor, Acceptor
+from .transport.base import Transport
 
 
 class CASPaxos:
@@ -25,35 +26,48 @@ class CASPaxos:
         node_id: str = "node1",
         acceptors: Optional[List[Acceptor]] = None,
         num_acceptors: int = 3,
-        phase_timeout: float = 5.0
+        phase_timeout: float = 5.0,
+        *,
+        transport: Optional[Transport] = None,
+        remote_acceptor_ids: Optional[List[str]] = None,
+        quorum_size: Optional[int] = None
     ):
         """
         Initialize CASPaxos instance.
         
         Args:
             node_id: Unique identifier for this node
-            acceptors: List of acceptor instances (creates in-memory if None)
-            num_acceptors: Number of in-memory acceptors to create if acceptors is None
+            acceptors: Local acceptor instances (optional)
+            num_acceptors: Local defaults created only when no acceptors or remote IDs are supplied
             phase_timeout: Positive finite deadline in seconds for each protocol phase
+            transport: Transport used for remote acceptors; caller owns its lifecycle
+            remote_acceptor_ids: Remote acceptors to combine with local instances
+            quorum_size: Quorum for the combined cluster (default: majority)
         """
         self.node_id = node_id
         
-        # Create acceptors if not provided
-        if acceptors is None:
-            self.acceptors = [
+        if acceptors is None and not remote_acceptor_ids:
+            acceptors = [
                 InMemoryAcceptor(f"acceptor_{i}")
                 for i in range(num_acceptors)
             ]
-        else:
-            self.acceptors = acceptors
-        
-        # Create proposer
-        self.proposer = Proposer(node_id, self.acceptors, phase_timeout=phase_timeout)
+        self.proposer = Proposer(
+            node_id,
+            acceptors,
+            quorum_size=quorum_size,
+            phase_timeout=phase_timeout,
+            transport=transport,
+            remote_acceptor_ids=remote_acceptor_ids,
+        )
+        self.acceptors = self.proposer.acceptors
     
     async def change(
         self,
         key: str,
-        update_fn: Callable[[Optional[Any]], Any]
+        update_fn: Callable[[Optional[Any]], Any],
+        extra: Optional[Any] = None,
+        *,
+        retries: int = 10
     ) -> Any:
         """
         Execute a strongly consistent change operation.
@@ -66,6 +80,8 @@ class CASPaxos:
         Args:
             key: The key to operate on
             update_fn: Function that takes current value and returns new value
+            extra: Optional data forwarded to protocol requests
+            retries: Maximum prepare attempts; uncertain accepts are never retried
             
         Returns:
             The new value after applying update_fn
@@ -73,7 +89,7 @@ class CASPaxos:
         Raises:
             ProposerError: If consensus cannot be reached
         """
-        return await self.proposer.change(key, update_fn)
+        return await self.proposer.change(key, update_fn, extra, retries=retries)
     
     async def get(self, key: str) -> Optional[Any]:
         """
@@ -85,7 +101,7 @@ class CASPaxos:
         Returns:
             Current value or None if key doesn't exist
         """
-        return await self.change(key, lambda x: x)
+        return await self.proposer.get(key)
     
     async def put(self, key: str, value: Any) -> Any:
         """
@@ -98,7 +114,13 @@ class CASPaxos:
         Returns:
             The written value
         """
-        return await self.change(key, lambda x: value)
+        return await self.proposer.put(key, value)
+
+    async def compare_and_swap(
+        self, key: str, expected: Any, new_value: Any
+    ) -> Tuple[bool, Any]:
+        """Return (matched, resulting_value) after a consensus-backed comparison."""
+        return await self.proposer.compare_and_swap(key, expected, new_value)
 
 
 class KeyValueStore:

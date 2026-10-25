@@ -1,288 +1,251 @@
-"""
-Proposer implementation for CASPaxos protocol.
-
-The proposer coordinates the two-phase consensus protocol, managing
-prepare and accept phases to achieve consensus on values.
-"""
+"""CASPaxos proposer for local, remote, and mixed acceptor clusters."""
 
 import asyncio
 from copy import deepcopy
 from math import isfinite
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
 from .ballot import BallotNumber
 from .messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
 from .quorum import collect_responses
 from ..storage.acceptor import Acceptor
+from ..transport.base import Transport
+from ..transport.proxy import RemoteAcceptor
 
 
 class ProposerError(Exception):
-    """Base exception for proposer errors."""
-    
+    """A failed preparation, indeterminate accept, or rejected update."""
+
     def __init__(self, code: str, message: str = ""):
         super().__init__(message or code)
         self.code = code
 
 
 class InsufficientQuorumError(Exception):
-    """Raised when insufficient acceptors respond successfully."""
-    
+    """A protocol phase could not confirm enough successful responses."""
+
     def __init__(self, responses: List[Any]):
         super().__init__(f"Insufficient quorum: {len(responses)} responses")
         self.responses = responses
 
 
 class Proposer:
+    """Coordinate consensus using one API for every acceptor configuration.
+
+    Updates on the same key are serialized. Successful accepts reserve the next
+    ballot, allowing subsequent operations to skip prepare while that cached
+    promise remains usable. Only prepare failures are automatically retried.
     """
-    CASPaxos proposer implementation.
-    
-    The proposer coordinates the consensus protocol by:
-    1. Sending prepare requests to acceptors (Phase 1)
-    2. Applying the update function to the latest value
-    3. Sending accept requests with the new value (Phase 2)
-    """
-    
+
     def __init__(
         self,
         node_id: str,
-        acceptors: List[Acceptor],
+        acceptors: Optional[List[Acceptor]] = None,
         quorum_size: Optional[int] = None,
-        phase_timeout: float = 5.0
+        phase_timeout: float = 5.0,
+        *,
+        transport: Optional[Transport] = None,
+        remote_acceptor_ids: Optional[List[str]] = None,
     ):
-        """
-        Initialize the proposer.
-        
-        Args:
-            node_id: Unique identifier for this proposer
-            acceptors: List of acceptor instances
-            quorum_size: Size of quorum needed (default: majority)
-            phase_timeout: Positive finite deadline in seconds for each protocol phase
-        """
-        self.node_id = node_id
-        self.acceptors = acceptors
-        self.quorum_size = quorum_size or (len(acceptors) // 2 + 1)
-        
-        if self.quorum_size > len(acceptors):
-            raise ValueError(f"Quorum size {self.quorum_size} > acceptors {len(acceptors)}")
+        """Configure local acceptors, remote IDs, or both.
 
+        quorum_size defaults to a majority of the combined cluster. Each phase
+        has its own positive, finite phase_timeout in seconds. The caller owns
+        the transport and remains responsible for closing it.
+        """
+        if remote_acceptor_ids and transport is None:
+            raise ValueError("remote_acceptor_ids require a transport")
+        self.node_id = node_id
+        self.transport = transport
+        self.acceptors = list(acceptors or [])
+        if transport is not None:
+            self.acceptors.extend(
+                RemoteAcceptor(acceptor_id, transport)
+                for acceptor_id in remote_acceptor_ids or []
+            )
+        if not self.acceptors:
+            raise ValueError("No acceptors provided (neither local nor remote)")
+        self.quorum_size = quorum_size or (len(self.acceptors) // 2 + 1)
+        if self.quorum_size > len(self.acceptors):
+            raise ValueError(
+                f"Quorum size {self.quorum_size} > acceptors {len(self.acceptors)}"
+            )
         if not isfinite(phase_timeout) or phase_timeout <= 0:
             raise ValueError("phase_timeout must be positive and finite")
         self.phase_timeout = phase_timeout
-        
-        # Current ballot for this proposer
-        self.ballot = BallotNumber(0, node_id)
-        
-        # Cache of accepted values per key
+        self.ballot_counters: Dict[str, int] = {}
         self.cache: Dict[str, Tuple[BallotNumber, Any]] = {}
-        
-        # Locks for concurrent operations on same key
         self.locks: Dict[str, asyncio.Lock] = {}
-    
+
     def _get_lock(self, key: str) -> asyncio.Lock:
-        """Get or create a lock for a key."""
         if key not in self.locks:
             self.locks[key] = asyncio.Lock()
         return self.locks[key]
-    
+
+    def _next_ballot(self, key: str) -> BallotNumber:
+        counter = self.ballot_counters.get(key, 0) + 1
+        self.ballot_counters[key] = counter
+        return BallotNumber(counter, self.node_id)
+
     async def change(
         self,
         key: str,
         update_fn: Callable[[Optional[Any]], Any],
-        extra: Optional[Any] = None
+        extra: Optional[Any] = None,
+        *,
+        retries: int = 10,
     ) -> Any:
-        """
-        Execute a change operation using CASPaxos.
-        
-        This is the main entry point for proposers. It:
-        1. Acquires a lock for the key
-        2. Runs prepare phase to get current value
-        3. Applies update function
-        4. Runs accept phase with new value
-        
-        Args:
-            key: The key to operate on
-            update_fn: Function to compute new value from current value
-            extra: Optional extra data for protocol extensions
-            
-        Returns:
-            The new value after applying update_fn
-            
-        Raises:
-            ProposerError: If consensus cannot be reached
+        """Apply an update once, after obtaining a current value and ballot.
+
+        retries bounds prepare attempts, not accept attempts. An unconfirmed
+        accept raises ProposerError with code INDETERMINATE and is never replayed.
+        Exhausted preparation raises MAX_RETRIES. A callback exception commits
+        the unchanged value, then raises UpdateError with the original cause.
+        Other unexpected errors use UnexpectedError; cancellation propagates.
+
+        Values are isolated snapshots. extra is forwarded to protocol requests.
         """
         async with self._get_lock(key):
             try:
-                # Phase 1: Prepare
-                ballot, current_value = await self._prepare_phase(key, extra)
-                
-                # Apply update function
-                new_value = None
+                last_error = None
+                for attempt in range(retries):
+                    try:
+                        ballot, current_value = await self._prepare_phase(key, extra)
+                        break
+                    except InsufficientQuorumError as error:
+                        last_error = error
+                        if attempt + 1 < retries:
+                            conflicted = any(
+                                getattr(response, "is_conflict", False)
+                                for response in error.responses
+                            )
+                            delay = 0.01 * (2 ** attempt) if conflicted else 0.1
+                            await asyncio.sleep(delay)
+                else:
+                    raise ProposerError(
+                        "MAX_RETRIES",
+                        f"Failed after {retries} prepare attempts. Last error: {last_error}",
+                    ) from last_error
+
                 update_error = None
                 try:
                     new_value = update_fn(deepcopy(current_value))
-                except Exception as e:
-                    update_error = e
-                    new_value = current_value  # Keep current value on error
-
-                # Detach caller-owned values before accept requests can yield.
+                except Exception as error:
+                    update_error = error
+                    new_value = current_value
+                # Snapshot before request I/O can let callers mutate the result.
                 new_value = deepcopy(new_value)
-                
-                # Get promise ballot for next round
                 promise = ballot.next()
-                
-                # Phase 2: Accept
                 await self._accept_phase(key, ballot, new_value, promise, extra)
-                
-                # Cache the accepted value
-                self.cache[key] = (promise, new_value)
-                
-                # Raise update error after committing (if any)
-                if update_error:
-                    raise ProposerError("UpdateError", str(update_error))
-                
+
+                # A minority conflict may have advanced the observed frontier
+                # beyond the next promise even though this round succeeded.
+                if promise.counter > self.ballot_counters[key]:
+                    self.cache[key] = (promise, new_value)
+                if update_error is not None:
+                    raise ProposerError("UpdateError", str(update_error)) from update_error
                 return deepcopy(new_value)
-                
             except ProposerError:
                 raise
-            except Exception as e:
-                raise ProposerError("UnexpectedError", str(e))
-    
+            except Exception as error:
+                raise ProposerError("UnexpectedError", str(error)) from error
+
     async def _prepare_phase(
-        self,
-        key: str,
-        extra: Optional[Any] = None
+        self, key: str, extra: Optional[Any] = None
     ) -> Tuple[BallotNumber, Optional[Any]]:
-        """
-        Execute prepare phase (Phase 1) of CASPaxos.
-        
-        Args:
-            key: The key to prepare
-            extra: Optional extra data
-            
-        Returns:
-            Tuple of (ballot, current_value)
-            
-        Raises:
-            ProposerError: If prepare phase fails
-        """
-        # Check cache first
-        if key in self.cache:
-            return self.cache[key]
-        
-        # Increment ballot for this round
-        self.ballot = self.ballot.increment()
-        # Other keys may advance the proposer counter while this round awaits I/O.
-        ballot = BallotNumber(self.ballot.counter, self.node_id)
-        
-        # Send prepare requests to all acceptors
-        prepare_requests = [
-            acceptor.prepare(PrepareRequest(key, ballot, extra))
-            for acceptor in self.acceptors
-        ]
-        
-        # Wait for quorum of responses
+        cached = self.cache.get(key)
+        if cached is not None:
+            ballot, value = cached
+            if ballot.counter > self.ballot_counters.get(key, 0):
+                self.ballot_counters[key] = ballot.counter
+                return ballot, value
+            self.cache.pop(key, None)
+
+        # A round-local ballot cannot be changed by work on another key.
+        ballot = self._next_ballot(key)
         responses = await self._wait_for_quorum(
-            prepare_requests,
-            lambda r: r.is_prepared
+            key,
+            [acceptor.prepare(PrepareRequest(key, ballot, extra)) for acceptor in self.acceptors],
+            lambda response: isinstance(response, PrepareResponse) and response.is_prepared,
         )
-        
-        # Find the value with highest ballot
         highest_ballot = BallotNumber.zero()
-        accepted_value = None
-        
+        current_value = None
         for response in responses:
-            if response.ballot and response.ballot > highest_ballot:
+            if response.ballot is not None and response.ballot > highest_ballot:
                 highest_ballot = response.ballot
-                accepted_value = response.value
-        
-        # Cache and return
-        self.cache[key] = (ballot, accepted_value)
-        return ballot, accepted_value
-    
+                current_value = response.value
+        return ballot, current_value
+
     async def _accept_phase(
         self,
         key: str,
         ballot: BallotNumber,
         value: Any,
         promise: BallotNumber,
-        extra: Optional[Any] = None
+        extra: Optional[Any] = None,
     ) -> None:
-        """
-        Execute accept phase (Phase 2) of CASPaxos.
-        
-        Args:
-            key: The key to accept
-            ballot: The ballot number for this proposal
-            value: The value to accept
-            promise: The promise ballot for next round
-            extra: Optional extra data
-            
-        Raises:
-            ProposerError: If accept phase fails
-        """
-        # An accept may persist even if its response is lost or cancelled.
-        # change() restores the cache only after a successful quorum.
+        # Acceptance may persist despite an error, timeout, or cancellation.
+        # Only a confirmed quorum may restore the cache for another operation.
         self.cache.pop(key, None)
-
-        # Send accept requests to all acceptors
-        accept_requests = [
-            acceptor.accept(AcceptRequest(key, ballot, value, promise, extra))
-            for acceptor in self.acceptors
-        ]
-        
         try:
-            # Wait for quorum of successful responses
             await self._wait_for_quorum(
-                accept_requests,
-                lambda r: r.is_ok
+                key,
+                [
+                    acceptor.accept(AcceptRequest(key, ballot, value, promise, extra))
+                    for acceptor in self.acceptors
+                ],
+                lambda response: isinstance(response, AcceptResponse) and response.is_ok,
             )
-        except InsufficientQuorumError as e:
-            # Check for conflicts and fast-forward ballot if needed
-            for response in e.responses:
-                if hasattr(response, 'is_conflict') and response.is_conflict and response.ballot:
-                    self.ballot.fastforward_after(response.ballot)
-            raise ProposerError("CommitError", "Failed to reach consensus")
-    
+        except InsufficientQuorumError as error:
+            raise ProposerError(
+                "INDETERMINATE",
+                "Accept quorum was not confirmed; the update may have been applied",
+            ) from error
+
     async def _wait_for_quorum(
         self,
-        requests: List,
-        success_predicate: Callable[[Any], bool]
+        key: str,
+        requests: List[Awaitable[Any]],
+        success_predicate: Callable[[Any], bool],
     ) -> List[Any]:
-        """
-        Wait for a quorum of successful responses.
-        
-        Args:
-            requests: List of async requests to wait for
-            success_predicate: Function to check if response is successful
-            
-        Returns:
-            List of successful responses
-            
-        Raises:
-            InsufficientQuorumError: If quorum cannot be reached
-        """
         responses = await collect_responses(
             requests, self.quorum_size, success_predicate, self.phase_timeout
         )
-        
-        # Separate successful and failed responses
         successful = []
-        all_responses = []
-        
         for response in responses:
-            if isinstance(response, Exception):
-                continue  # Skip exceptions
-            
-            all_responses.append(response)
-            if success_predicate(response):
-                successful.append(response)
-        
-        # Check if we have quorum
-        if len(successful) >= self.quorum_size:
-            return successful
-        
-        # Handle conflicts by checking conflicting ballots
-        for response in all_responses:
-            if hasattr(response, 'is_conflict') and response.is_conflict and response.ballot:
-                self.ballot.fastforward_after(response.ballot)
-        
-        raise InsufficientQuorumError(all_responses)
+            if isinstance(response, (PrepareResponse, AcceptResponse)):
+                if response.is_conflict and response.ballot is not None:
+                    self.ballot_counters[key] = max(
+                        self.ballot_counters.get(key, 0), response.ballot.counter
+                    )
+                if success_predicate(response):
+                    successful.append(response)
+        if len(successful) < self.quorum_size:
+            raise InsufficientQuorumError(responses)
+        return successful
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Read a value through consensus using the identity update."""
+        return await self.change(key, lambda value: value)
+
+    async def put(self, key: str, value: Any) -> Any:
+        """Replace a value through consensus."""
+        return await self.change(key, lambda _: value)
+
+    async def compare_and_swap(
+        self, key: str, expected: Any, new_value: Any
+    ) -> Tuple[bool, Any]:
+        """Return (matched, resulting_value) after consensus.
+
+        matched reports whether the current value equaled expected, even when
+        new_value already equals the current value. A mismatch leaves it unchanged.
+        """
+        matched = False
+
+        def update(current):
+            nonlocal matched
+            matched = bool(current == expected)
+            return new_value if matched else current
+
+        actual_value = await self.change(key, update)
+        return matched, actual_value

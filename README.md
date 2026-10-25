@@ -49,6 +49,53 @@ async def main():
 asyncio.run(main())
 ```
 
+### Local and Remote Acceptors
+
+`caspaxos.core.Proposer` is the single consensus implementation. Both it and
+`CASPaxos` expose `change`, `get`, `put`, and `compare_and_swap`, using the same
+`caspaxos.core.ProposerError` exception.
+
+Pass `acceptors=[...]` for local participants, `transport` and
+`remote_acceptor_ids` for remote participants, or both for a mixed cluster.
+The default quorum is a majority of the combined membership.
+
+```python
+import asyncio
+from caspaxos.core import Proposer
+from caspaxos.acceptor import BaseAcceptor
+from caspaxos.transport.direct import DirectTransport
+
+async def main():
+    transport = DirectTransport()
+    try:
+        remote_ids = ["a", "b", "c"]
+        for node_id in remote_ids:
+            acceptor = BaseAcceptor(node_id)
+            await transport.register_acceptor(
+                node_id, acceptor.prepare, acceptor.accept
+            )
+        proposer = Proposer(
+            "p", transport=transport, remote_acceptor_ids=remote_ids
+        )
+        await proposer.put("counter", 1)
+        print(await proposer.compare_and_swap("counter", 1, 2))  # (True, 2)
+        print(await proposer.get("counter"))  # 2
+    finally:
+        await transport.close()
+
+asyncio.run(main())
+```
+
+`DirectTransport` uses in-process handlers; it does not provide network I/O.
+The caller owns the transport and must close it. `CASPaxos` accepts the same
+`acceptors`, `transport`, `remote_acceptor_ids`, `quorum_size`, and `phase_timeout`
+options. It creates default local acceptors only when neither local acceptors
+nor remote IDs are supplied; a remote-only cluster gets no implicit local replicas.
+
+Both APIs support `change(key, update_fn, extra=None, *, retries=10)`.
+`extra` is forwarded to protocol requests; `retries` bounds prepare attempts,
+not accept attempts. The versioned `CASKeyValue.read` / `write` API is unchanged.
+
 ### Key-Value Store
 
 ```python
@@ -96,12 +143,12 @@ async def main():
 asyncio.run(main())
 ```
 
-For value-based CAS, `EnhancedProposer.compare_and_swap(key, expected, new_value)`
+For value-based CAS, `Proposer.compare_and_swap(key, expected, new_value)`
 returns `(matched, resulting_value)` after consensus. The boolean reports whether
 the current value matched `expected`, not whether the result equals `new_value`.
 A mismatched expectation returns `False` even if the replacement is already
 stored; a matching no-op returns `True`. Consensus failures still raise rather
-than reporting a comparison result.
+than reporting a comparison result. `CASPaxos.compare_and_swap` exposes the same operation.
 
 ## Architecture
 
@@ -257,14 +304,14 @@ PYTHONPATH=/app env/bin/python -m caspaxos.caspaxos.example
 
 ### Quorum Completion and Timeouts
 
-Both proposers finish each prepare or accept phase as soon as a quorum succeeds.
-They also stop early when the remaining requests cannot form a quorum.
+The proposer finishes each prepare or accept phase as soon as a quorum succeeds.
+It also stops early when the remaining requests cannot form a quorum.
 A stalled minority no longer prevents progress.
 
-`CASPaxos`, `Proposer`, and `EnhancedProposer` accept a positive, finite
-`phase_timeout` in seconds, defaulting to `5.0`. It bounds each phase, not the
-whole change operation; enhanced proposer prepare retries each get a new
-deadline. For example, `CASPaxos(phase_timeout=0.5)` uses a half-second deadline
+`CASPaxos` and `Proposer` accept a positive, finite `phase_timeout` in seconds,
+defaulting to `5.0`. It bounds each phase, not the whole change operation;
+prepare retries each get a new deadline. For example,
+`CASPaxos(phase_timeout=0.5)` uses a half-second deadline
 for each prepare or accept phase.
 
 Outstanding requests are cancelled on completion, failure, deadline expiry, or
@@ -279,14 +326,17 @@ finish.
 
 Values must support `copy.deepcopy`, including independent copies of mutable
 contents. Update functions receive detached values and may mutate and return
-them. Both proposers snapshot the result before sending accept requests and
-return a separate copy, so later caller mutations cannot change a proposal,
+them. The proposer snapshots the result before sending accept requests and
+returns a separate copy, so later caller mutations cannot change a proposal,
 the proposer cache, or accepted state.
 
 The in-memory backend snapshots complete acceptor state on write and read,
 including ballots and nested values. Custom storage backends must provide the
-same ownership isolation. In `CASPaxos`, a callback that mutates its argument
-and then raises leaves the previous value unchanged.
+same ownership isolation. If an update callback raises, the proposer attempts
+to commit the unchanged value. A confirmed quorum then raises `ProposerError`
+with `code == "UpdateError"` and the original exception as its cause. If that
+accept cannot be confirmed, it reports `INDETERMINATE` instead. Other unexpected
+exceptions are wrapped with `code == "UnexpectedError"`.
 
 ### Atomic Acceptor Transitions
 
@@ -308,24 +358,26 @@ deletion and clearing so queued operations keep using the same lock.
 ### Failed or Cancelled Writes
 
 `CASPaxos` / `Proposer` discard the cached round before sending accept requests
-and restore the cache only after a quorum succeeds. If acceptance fails or the
-operation is cancelled, the next operation runs a fresh prepare phase instead
-of reusing the uncertain round's ballot for a different value.
+and restore the cache only after a quorum succeeds and the next reserved ballot
+exceeds the observed conflict counter. If acceptance fails or the operation is
+cancelled, the next operation runs a fresh prepare phase instead of reusing the
+uncertain round's ballot for a different value.
 
 A failed or cancelled write may already have reached some acceptors; it is not
 a rollback guarantee. Retrying a non-idempotent update is not guaranteed to
 apply it exactly once.
 
-`EnhancedProposer.change(..., retries=10)` retries only preparation, before
-applying the update or sending accept requests. If an accept quorum cannot be
-confirmed, it raises `caspaxos.core.proposer_enhanced.ProposerError` with
+`change(..., retries=10)` retries only preparation, before applying the update
+or sending accept requests. Exhausting the prepare budget raises
+`caspaxos.core.ProposerError` with `code == "MAX_RETRIES"`. If an accept quorum
+cannot be confirmed, it raises the same exception type with
 `code == "INDETERMINATE"` and does not reapply the update. This includes accept
 conflicts: other replicas may already have accepted the proposed value.
 A confirmed quorum still succeeds when a minority of responses are lost.
 
-The enhanced proposer remembers the highest conflicting ballot counter observed
-for each key during either phase, including minority conflicts in a successful
-quorum. Its next ballot exceeds that counter while retaining its own node ID.
+The proposer maintains per-key ballot counters and remembers the highest
+conflicting counter observed during either phase, including minority conflicts
+in a successful quorum. Its next ballot exceeds that counter while retaining its own node ID.
 Prepare retries therefore jump past observed promises rather than counting up
 one at a time. Accept conflicts still report an indeterminate outcome; the
 remembered counter is used by the next explicitly requested operation.

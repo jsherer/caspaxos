@@ -11,9 +11,20 @@ if __name__ == "__main__" and __package__ is None:
 
 from caspaxos.acceptor import BaseAcceptor
 from caspaxos.storage.backends.memory import InMemoryStorage
-from caspaxos.core.proposer_enhanced import EnhancedProposer
+from caspaxos.core.proposer import Proposer
 from caspaxos.core.ballot import BallotNumber
 from caspaxos.core.messages import PrepareRequest
+
+
+class DebugAcceptor(BaseAcceptor):
+    """Log each actual prepare request without sending a second one."""
+
+    async def prepare(self, request):
+        print(f"\n{self.node_id} prepare request: {request}")
+        response = await super().prepare(request)
+        print(f"{self.node_id} response: {response}")
+        print(f"Response type: {type(response)}")
+        return response
 
 
 async def test_basic():
@@ -32,42 +43,15 @@ async def test_basic():
     
     # Now test with proposer
     acceptors = [
-        BaseAcceptor(f"acceptor_{i}", InMemoryStorage())
+        DebugAcceptor(f"acceptor_{i}", InMemoryStorage())
         for i in range(3)
     ]
     
-    proposer = EnhancedProposer("proposer_1", acceptors=acceptors)
-    
-    # Try a simple operation with debugging
+    proposer = Proposer("proposer_1", acceptors=acceptors)
+
     print("\nAttempting write through proposer...")
-    try:
-        # Monkey-patch to add debugging
-        original_prepare_phase = proposer._prepare_phase
-        
-        async def debug_prepare_phase(key, ballot):
-            request = PrepareRequest(key, ballot)
-            print(f"\nPrepare phase - Request: {request}")
-            
-            # Send prepare requests to all acceptors concurrently
-            tasks = [acceptor.prepare(request) for acceptor in proposer.acceptors]
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            print(f"Got {len(responses)} responses:")
-            for i, resp in enumerate(responses):
-                print(f"  Response {i}: type={type(resp)}, value={resp}")
-                if hasattr(resp, '__dict__'):
-                    print(f"    attributes: {resp.__dict__}")
-            
-            return await original_prepare_phase(key, ballot)
-        
-        proposer._prepare_phase = debug_prepare_phase
-        
-        result = await proposer.write("test_key", "test_value")
-        print(f"Success! Written: {result}")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+    result = await proposer.put("test_key", "test_value")
+    print(f"Success! Written: {result}")
 
 
 if __name__ == "__main__":

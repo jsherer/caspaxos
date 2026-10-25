@@ -4,6 +4,8 @@ import pytest
 import asyncio
 from .. import CASPaxos, KeyValueStore, CASKeyValue
 from ..core import ProposerError
+from ..acceptor import BaseAcceptor
+from ..transport.direct import DirectTransport
 
 
 class TestCASPaxos:
@@ -143,6 +145,46 @@ class TestCASPaxos:
         assert await paxos.get("key") == {"items": [1]}
         for acceptor in paxos.acceptors:
             assert (await acceptor.get_state("key")).accepted_value == {"items": [1]}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("local_count", [0, 1], ids=["remote", "mixed"])
+    async def test_transport_cluster_uses_the_public_api(self, local_count):
+        transport = DirectTransport()
+        acceptors = [BaseAcceptor(str(i)) for i in range(3)]
+        remote_ids = [acceptor.node_id for acceptor in acceptors[local_count:]]
+        try:
+            for acceptor in acceptors[local_count:]:
+                await transport.register_acceptor(
+                    acceptor.node_id, acceptor.prepare, acceptor.accept
+                )
+            paxos = CASPaxos(
+                "p",
+                acceptors=acceptors[:local_count] if local_count else None,
+                transport=transport,
+                remote_acceptor_ids=remote_ids,
+            )
+            await paxos.put("key", {"value": 1})
+            assert await paxos.change(
+                "key", lambda current: {"value": current["value"] + 1}
+            ) == {"value": 2}
+            assert await paxos.compare_and_swap(
+                "key", {"value": 2}, {"value": 3}
+            ) == (True, {"value": 3})
+            assert await paxos.get("key") == {"value": 3}
+
+            # Missing remote replicas must not be replaced by an implicit
+            # local cluster that could incorrectly acknowledge this write.
+            for node in remote_ids[-2:]:
+                await transport.unregister_acceptor(node)
+            with pytest.raises(ProposerError) as error:
+                await paxos.put("key", {"value": 4})
+            assert error.value.code == "INDETERMINATE"
+        finally:
+            await transport.close()
+
+    def test_remote_cluster_requires_transport(self):
+        with pytest.raises(ValueError):
+            CASPaxos(remote_acceptor_ids=["a", "b", "c"])
 
 
 class TestKeyValueStore:

@@ -19,8 +19,7 @@ if __name__ == "__main__" and __package__ is None:
 from caspaxos.acceptor import BaseAcceptor
 from caspaxos.storage.backends.memory import InMemoryStorage
 from caspaxos.transport.direct import DirectTransport
-from caspaxos.transport.proxy import RemoteAcceptor
-from caspaxos.core.proposer_enhanced import EnhancedProposer
+from caspaxos.core.proposer import Proposer
 
 
 async def local_acceptors_example():
@@ -34,11 +33,11 @@ async def local_acceptors_example():
     ]
     
     # Create proposer with local acceptors
-    proposer = EnhancedProposer("proposer_1", acceptors=acceptors)
+    proposer = Proposer("proposer_1", acceptors=acceptors)
     
     # Perform some operations
     print("Writing initial value...")
-    result = await proposer.write("config", {"version": 1})
+    result = await proposer.put("config", {"version": 1})
     print(f"Written: {result}")
     
     print("Updating value...")
@@ -49,7 +48,7 @@ async def local_acceptors_example():
     print(f"Updated: {result}")
     
     print("Reading value...")
-    result = await proposer.read("config")
+    result = await proposer.get("config")
     print(f"Read: {result}")
 
 
@@ -74,7 +73,7 @@ async def remote_acceptors_example():
         )
     
     # Create proposer that uses transport to reach acceptors
-    proposer = EnhancedProposer(
+    proposer = Proposer(
         "proposer_2",
         transport=transport,
         remote_acceptor_ids=[f"remote_acceptor_{i}" for i in range(3)]
@@ -82,7 +81,7 @@ async def remote_acceptors_example():
     
     # Perform operations (same as before, but now via transport)
     print("Writing initial value via transport...")
-    result = await proposer.write("settings", {"mode": "production"})
+    result = await proposer.put("settings", {"mode": "production"})
     print(f"Written: {result}")
     
     print("Updating value via transport...")
@@ -116,7 +115,7 @@ async def mixed_acceptors_example():
         )
     
     # Create proposer with mixed acceptors
-    proposer = EnhancedProposer(
+    proposer = Proposer(
         "proposer_3",
         acceptors=[local_acceptor],  # Local acceptor
         transport=transport,
@@ -128,7 +127,7 @@ async def mixed_acceptors_example():
     
     # Perform distributed consensus
     print("Performing consensus with mixed acceptors...")
-    result = await proposer.write("distributed_key", {"consensus": "achieved"})
+    result = await proposer.put("distributed_key", {"consensus": "achieved"})
     print(f"Consensus result: {result}")
     
     # Demonstrate compare-and-swap
@@ -144,45 +143,56 @@ async def mixed_acceptors_example():
     await transport.close()
 
 
+class SwitchableAcceptor(BaseAcceptor):
+    """Simulate an unavailable participant without changing cluster membership."""
+
+    available = True
+
+    async def prepare(self, request):
+        if not self.available:
+            raise ConnectionError(f"{self.node_id} is unavailable")
+        return await super().prepare(request)
+
+    async def accept(self, request):
+        if not self.available:
+            raise ConnectionError(f"{self.node_id} is unavailable")
+        return await super().accept(request)
+
+
 async def failure_handling_example():
     """Example showing how the system handles acceptor failures."""
     print("\n=== Failure Handling Example ===")
     
     # Create 5 acceptors (can tolerate 2 failures with quorum of 3)
     acceptors = [
-        BaseAcceptor(f"acceptor_{i}", InMemoryStorage())
+        SwitchableAcceptor(f"acceptor_{i}", InMemoryStorage())
         for i in range(5)
     ]
     
-    proposer = EnhancedProposer("proposer_4", acceptors=acceptors)
+    proposer = Proposer("proposer_4", acceptors=acceptors)
     print(f"Created {len(acceptors)} acceptors, quorum size: {proposer.quorum_size}")
     
     # Write initial value
-    await proposer.write("resilient_key", {"status": "healthy"})
+    await proposer.put("resilient_key", {"status": "healthy"})
     print("Initial write successful")
     
-    # Simulate 2 acceptors "failing" by removing them
-    # (In real scenario, they might be network partitioned)
+    # Simulate a network partition while retaining the five-member quorum.
     failed_acceptors = acceptors[:2]
-    proposer.acceptors = acceptors[2:]  # Only 3 acceptors remain
-    print(f"Simulated failure of 2 acceptors, {len(proposer.acceptors)} remain")
-    
-    # System should still work with 3 acceptors (quorum of 3)
-    try:
-        result = await proposer.change(
-            "resilient_key",
-            lambda v: {**v, "after_failure": True} if v else {"after_failure": True}
-        )
-        print(f"Update after failure successful: {result}")
-    except Exception as e:
-        print(f"Update failed: {e}")
-    
-    # Restore one acceptor
-    proposer.acceptors.append(failed_acceptors[0])
-    print(f"Restored 1 acceptor, {len(proposer.acceptors)} available")
-    
-    # Should work even better now
-    result = await proposer.read("resilient_key")
+    for acceptor in failed_acceptors:
+        acceptor.available = False
+    print("Simulated failure of 2 acceptors, 3 remain available")
+
+    # Three available acceptors still satisfy the original quorum of three.
+    result = await proposer.change(
+        "resilient_key",
+        lambda v: {**v, "after_failure": True} if v else {"after_failure": True}
+    )
+    print(f"Update after failure successful: {result}")
+
+    failed_acceptors[0].available = True
+    print("Restored 1 acceptor, 4 available")
+
+    result = await proposer.get("resilient_key")
     print(f"Read after restoration: {result}")
 
 

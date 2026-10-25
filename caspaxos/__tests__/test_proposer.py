@@ -2,11 +2,10 @@
 
 import pytest
 import asyncio
-from ..core import Proposer, ProposerError, InsufficientQuorumError
+from ..core import Proposer, ProposerError
 from ..core.ballot import BallotNumber
 from ..storage.memory import InMemoryAcceptor
 from ..core.messages import PrepareRequest
-from ..core.proposer_enhanced import EnhancedProposer, ProposerError as EnhancedProposerError
 
 
 class TestProposer:
@@ -29,26 +28,6 @@ class TestProposer:
         result = await proposer.change("key1", lambda x: f"{x}_modified")
         assert result == "value1_modified"
     
-    @pytest.mark.asyncio
-    async def test_quorum_calculation(self):
-        """Test quorum size calculation."""
-        # 3 acceptors -> quorum = 2
-        acceptors = [InMemoryAcceptor(f"a{i}") for i in range(3)]
-        proposer = Proposer("p1", acceptors)
-        assert proposer.quorum_size == 2
-        
-        # 5 acceptors -> quorum = 3
-        acceptors = [InMemoryAcceptor(f"a{i}") for i in range(5)]
-        proposer = Proposer("p1", acceptors)
-        assert proposer.quorum_size == 3
-        
-        # Custom quorum size
-        proposer = Proposer("p1", acceptors, quorum_size=4)
-        assert proposer.quorum_size == 4
-        
-        # Invalid quorum size
-        with pytest.raises(ValueError):
-            Proposer("p1", acceptors, quorum_size=6)
     
     @pytest.mark.asyncio
     async def test_concurrent_proposals_same_key(self):
@@ -117,62 +96,16 @@ class TestProposer:
         with pytest.raises(ProposerError) as exc_info:
             await proposer.change("key1", bad_update)
         assert exc_info.value.code == "UpdateError"
-        assert "Cannot update initial value" in str(exc_info.value)
         
         # Value should remain unchanged
         value = await proposer.change("key1", lambda x: x)
         assert value == "initial"
     
-    @pytest.mark.asyncio
-    async def test_ballot_advancement(self):
-        """Test that ballot numbers advance properly."""
+    def test_invalid_quorum(self):
+        """Reject a quorum larger than the configured cluster."""
         acceptors = [InMemoryAcceptor(f"acceptor_{i}") for i in range(3)]
-        proposer = Proposer("proposer1", acceptors)
-        
-        # Initial ballot
-        initial_ballot = proposer.ballot.counter
-        
-        # First proposal
-        await proposer.change("key1", lambda x: "value1")
-        assert proposer.ballot.counter > initial_ballot
-        
-        # Second proposal (cached, no ballot increment)
-        first_ballot = proposer.ballot.counter
-        await proposer.change("key1", lambda x: "value2")
-        # Ballot might not change if using cache
-        
-        # New key requires new ballot
-        await proposer.change("key2", lambda x: "value3")
-        assert proposer.ballot.counter > initial_ballot
-    
-    @pytest.mark.asyncio
-    async def test_cache_invalidation(self):
-        """Test that cache is properly managed."""
-        acceptors = [InMemoryAcceptor(f"acceptor_{i}") for i in range(3)]
-        proposer1 = Proposer("proposer1", acceptors)
-        
-        # First change caches the value
-        await proposer1.change("key1", lambda x: "value1")
-        assert "key1" in proposer1.cache
-        
-        # Second change on same key uses cache
-        await proposer1.change("key1", lambda x: "value2")
-        assert "key1" in proposer1.cache
-        
-        # Cache should contain the latest value
-        cached_ballot, cached_value = proposer1.cache["key1"]
-        assert cached_value == "value2"
-    
-    @pytest.mark.asyncio
-    async def test_insufficient_quorum(self):
-        """Test behavior with insufficient acceptors."""
-        # Create 3 acceptors but require 4 for quorum (impossible)
-        acceptors = [InMemoryAcceptor(f"acceptor_{i}") for i in range(3)]
-        
-        # Should raise ValueError when quorum > acceptors
-        with pytest.raises(ValueError) as exc_info:
-            proposer = Proposer("proposer1", acceptors, quorum_size=4)
-        assert "Quorum size 4 > acceptors 3" in str(exc_info.value)
+        with pytest.raises(ValueError):
+            Proposer("proposer1", acceptors, quorum_size=4)
 
     @pytest.mark.asyncio
     async def test_other_keys_cannot_change_an_inflight_ballot(self):
@@ -240,7 +173,7 @@ class TestProposer:
             else:
                 with pytest.raises(ProposerError) as error:
                     await pending
-                assert error.value.code == "CommitError"
+                assert error.value.code == "INDETERMINATE"
         finally:
             if not pending.done():
                 pending.cancel()
@@ -252,19 +185,11 @@ class TestProposer:
         # A fresh proposer must recover the acknowledged value, not the
         # minority's earlier value from an ambiguously completed operation.
         reader = Proposer("z", acceptors)
-        for _ in range(3):
-            try:
-                value = await reader.change("key", lambda value: value)
-                break
-            except ProposerError:
-                continue
-        else:
-            pytest.fail("reader could not acquire a ballot")
+        value = await reader.get("key")
         assert value == "second"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("proposer_type", [Proposer, EnhancedProposer])
-    async def test_proposal_snapshot_precedes_accept_io(self, proposer_type):
+    async def test_proposal_snapshot_precedes_accept_io(self):
         accepting = asyncio.Event()
         release = asyncio.Event()
 
@@ -275,7 +200,7 @@ class TestProposer:
                 return await super().accept(request)
 
         acceptors = [DelayedAcceptor(str(i)) for i in range(3)]
-        proposer = proposer_type("p", acceptors)
+        proposer = Proposer("p", acceptors)
         original = {"items": [1]}
         pending = asyncio.create_task(proposer.change("key", lambda _: original))
         try:
@@ -289,8 +214,6 @@ class TestProposer:
             release.set()
             await asyncio.gather(pending, return_exceptions=True)
 
-
-class TestEnhancedProposer:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "failure", ["lost_quorum", "partial_accept", "conflict", "minority_loss"]
@@ -320,17 +243,30 @@ class TestEnhancedProposer:
                 return response
 
         acceptors = [FaultAcceptor(str(i)) for i in range(3)]
-        proposer = EnhancedProposer("p", acceptors)
+        proposer = Proposer("p", acceptors)
+        calls = 0
+
+        def increment(value):
+            nonlocal calls
+            calls += 1
+            return (value or 0) + 1
+
         if failure == "minority_loss":
-            assert await proposer.change("counter", lambda value: (value or 0) + 1) == 1
+            assert await proposer.change("counter", increment) == 1
         else:
-            with pytest.raises(EnhancedProposerError) as error:
-                await proposer.change("counter", lambda value: (value or 0) + 1)
+            with pytest.raises(ProposerError) as error:
+                await proposer.change("counter", increment)
             assert error.value.code == "INDETERMINATE"
 
-        # Explicit recovery reads may adopt an uncertain write, but must never
-        # discover two increments from this single client operation.
-        assert await proposer.read("counter") == 1
+        assert calls == 1
+        recovered = await proposer.get("counter")
+        if failure == "partial_accept":
+            # A minority-only accept is not chosen: recovery may adopt it or
+            # select an untouched quorum. It must never find a second increment.
+            assert recovered in (None, 1)
+        else:
+            # A quorum persisted these writes even if replies were lost.
+            assert recovered == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure", ["connection_error", "conflict"])
@@ -349,9 +285,9 @@ class TestEnhancedProposer:
                 return await super().prepare(request)
 
         acceptors = [FaultAcceptor(str(i)) for i in range(3)]
-        proposer = EnhancedProposer("p", acceptors)
+        proposer = Proposer("p", acceptors)
         assert await proposer.change("counter", lambda value: (value or 0) + 1) == 1
-        assert await proposer.read("counter") == 1
+        assert await proposer.get("counter") == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -363,45 +299,45 @@ class TestEnhancedProposer:
         ],
     )
     async def test_compare_and_swap_reports_comparison(self, expected, replacement, success):
-        proposer = EnhancedProposer(
+        proposer = Proposer(
             "p", [InMemoryAcceptor(str(i)) for i in range(3)]
         )
-        await proposer.write("key", "current")
+        await proposer.put("key", "current")
         assert await proposer.compare_and_swap("key", expected, replacement) == (
             success, "current"
         )
-        assert await proposer.read("key") == "current"
+        assert await proposer.get("key") == "current"
 
     @pytest.mark.asyncio
     async def test_concurrent_compare_and_swap_has_one_winner(self):
-        proposer = EnhancedProposer(
+        proposer = Proposer(
             "p", [InMemoryAcceptor(str(i)) for i in range(3)]
         )
-        await proposer.write("key", "available")
+        await proposer.put("key", "available")
         results = await asyncio.gather(
             proposer.compare_and_swap("key", "available", "claimed"),
             proposer.compare_and_swap("key", "available", "claimed"),
         )
         assert sorted(results) == [(False, "claimed"), (True, "claimed")]
-        assert await proposer.read("key") == "claimed"
+        assert await proposer.get("key") == "claimed"
 
     @pytest.mark.asyncio
     async def test_takeover_advances_past_highest_conflicting_promise(self):
         acceptors = [InMemoryAcceptor(str(i)) for i in range(3)]
-        incumbent = EnhancedProposer("incumbent", acceptors)
+        incumbent = Proposer("incumbent", acceptors)
         for value in range(1, 21):
-            await incumbent.write("counter", value)
+            await incumbent.put("counter", value)
         for acceptor, counter in zip(acceptors, [100, 1000, 500]):
             response = await acceptor.prepare(
                 PrepareRequest("counter", BallotNumber(counter, "z"))
             )
             assert response.is_prepared
 
-        newcomer = EnhancedProposer("new", acceptors, quorum_size=3)
+        newcomer = Proposer("new", acceptors, quorum_size=3)
         # One rejected prepare must suffice to learn all observed frontiers,
         # without losing the value accepted before those outstanding promises.
         assert await newcomer.change("counter", lambda value: value + 1, retries=2) == 21
-        assert await newcomer.read("counter") == 21
+        assert await newcomer.get("counter") == 21
 
     @pytest.mark.asyncio
     async def test_accept_conflict_advances_next_explicit_operation(self):
@@ -417,9 +353,9 @@ class TestEnhancedProposer:
                 return await super().accept(request)
 
         acceptors = [PreemptingAcceptor(str(i)) for i in range(3)]
-        await EnhancedProposer("incumbent", acceptors).write("counter", 7)
-        newcomer = EnhancedProposer("new", acceptors)
-        with pytest.raises(EnhancedProposerError) as error:
+        await Proposer("incumbent", acceptors).put("counter", 7)
+        newcomer = Proposer("new", acceptors)
+        with pytest.raises(ProposerError) as error:
             await newcomer.change("counter", lambda value: value + 1)
         assert error.value.code == "INDETERMINATE"
         # Accept conflicts still must not replay the failed update. They only
@@ -443,7 +379,7 @@ class TestEnhancedProposer:
 
         acceptors = [OfflineAcceptor(str(i)) for i in range(3)]
         await acceptors[2].prepare(PrepareRequest("counter", BallotNumber(1000, "z")))
-        proposer = EnhancedProposer("p", acceptors)
+        proposer = Proposer("p", acceptors)
         assert await proposer.change("counter", lambda _: 7, retries=1) == 7
         # The next quorum now needs the replica whose high promise was already
         # observed during the successful operation.

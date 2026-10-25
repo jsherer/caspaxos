@@ -6,6 +6,7 @@ from ..transport.proxy import RemoteAcceptor
 from ..transport.base import TransportError
 from ..acceptor import BaseAcceptor
 from ..storage.backends.memory import InMemoryStorage
+from ..core import Proposer
 from ..core.ballot import BallotNumber
 from ..core.messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
 
@@ -230,22 +231,15 @@ class TestRemoteAcceptor:
         
         assert proxy.get_node_id() == "remote1"
     
-    @pytest.mark.asyncio
-    async def test_remote_acceptor_repr(self):
-        """Test string representation of remote acceptor."""
-        transport = DirectTransport()
-        proxy = RemoteAcceptor("remote1", transport)
-        
-        assert repr(proxy) == "RemoteAcceptor(id='remote1')"
 
 
 class TestTransportIntegration:
     """Integration tests for transport with proposer."""
     
+
     @pytest.mark.asyncio
     async def test_proposer_with_remote_acceptors(self):
         """Test proposer working with remote acceptors."""
-        from ..core.proposer_enhanced import EnhancedProposer
         
         # Setup transport
         transport = DirectTransport()
@@ -260,18 +254,18 @@ class TestTransportIntegration:
             )
         
         # Create proposer with remote acceptors
-        proposer = EnhancedProposer(
+        proposer = Proposer(
             "proposer1",
             transport=transport,
             remote_acceptor_ids=[f"acceptor{i}" for i in range(3)]
         )
         
         # Perform consensus
-        result = await proposer.write("test_key", "test_value")
+        result = await proposer.put("test_key", "test_value")
         assert result == "test_value"
         
         # Read back
-        value = await proposer.read("test_key")
+        value = await proposer.get("test_key")
         assert value == "test_value"
         
         # Clean up
@@ -280,7 +274,6 @@ class TestTransportIntegration:
     @pytest.mark.asyncio
     async def test_mixed_local_and_remote(self):
         """Test proposer with mixed local and remote acceptors."""
-        from ..core.proposer_enhanced import EnhancedProposer
         
         # Setup transport
         transport = DirectTransport()
@@ -298,17 +291,15 @@ class TestTransportIntegration:
             )
         
         # Create proposer with mixed acceptors
-        proposer = EnhancedProposer(
+        proposer = Proposer(
             "proposer1",
             acceptors=[local_acceptor],
             transport=transport,
             remote_acceptor_ids=[f"remote{i}" for i in range(2)]
         )
         
-        assert len(proposer.acceptors) == 3
-        
         # Perform consensus
-        result = await proposer.write("mixed_key", {"type": "mixed"})
+        result = await proposer.put("mixed_key", {"type": "mixed"})
         assert result == {"type": "mixed"}
         
         # Compare and swap

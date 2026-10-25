@@ -11,7 +11,7 @@ if __name__ == "__main__" and __package__ is None:
 
 from caspaxos.acceptor import BaseAcceptor
 from caspaxos.storage.backends.memory import InMemoryStorage
-from caspaxos.core.proposer_enhanced import EnhancedProposer
+from caspaxos.core.proposer import Proposer
 
 
 async def test_basic():
@@ -23,17 +23,11 @@ async def test_basic():
     ]
     
     # Create proposer
-    proposer = EnhancedProposer("proposer_1", acceptors=acceptors)
-    
-    try:
-        # Simple write
-        print("Writing value...")
-        result = await proposer.write("test_key", "test_value")
-        print(f"Success! Written: {result}")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+    proposer = Proposer("proposer_1", acceptors=acceptors)
+
+    print("Writing value...")
+    result = await proposer.put("test_key", "test_value")
+    print(f"Success! Written: {result}")
 
 
 if __name__ == "__main__":
