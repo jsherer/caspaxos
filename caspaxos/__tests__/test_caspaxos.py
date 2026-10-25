@@ -192,6 +192,33 @@ class TestKeyValueStore:
         await kv.put("list1", items)
         assert await kv.get("list1") == items
 
+    @pytest.mark.asyncio
+    async def test_repeated_delete_and_recreation(self):
+        kv = KeyValueStore()
+        # A stored None is a live entry, unlike a tombstone or a missing key.
+        await kv.put("key", None)
+        assert await kv.exists("key")
+        assert await kv.delete("key") is True
+        assert await kv.delete("key") is False
+        assert await kv.get("key") is None
+        assert not await kv.exists("key")
+
+        await kv.put("key", "replacement")
+        assert await kv.get("key") == "replacement"
+        assert await kv.exists("key")
+        assert await kv.delete("key") is True
+        assert not await kv.exists("key")
+
+    @pytest.mark.asyncio
+    async def test_concurrent_deletes_report_one_removal(self):
+        paxos = CASPaxos()
+        first, second = KeyValueStore(paxos), KeyValueStore(paxos)
+        await first.put("key", "value")
+        results = await asyncio.gather(first.delete("key"), second.delete("key"))
+        assert sorted(results) == [False, True]
+        assert await second.get("key") is None
+        assert not await first.exists("key")
+
 
 class TestCASKeyValue:
     """Test suite for CASKeyValue with compare-and-swap."""

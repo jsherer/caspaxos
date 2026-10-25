@@ -148,15 +148,20 @@ class KeyValueStore:
             key: The key to delete
             
         Returns:
-            True if key existed and was deleted, False otherwise
+            True if a live entry was deleted; False if missing or already deleted.
+            A stored None is a live entry.
         """
+        deleted = False
+
         def delete_fn(current):
-            if current is None:
-                return None
-            return {"value": None, "deleted": True}
-        
-        result = await self.paxos.change(key, delete_fn)
-        return result is not None and result.get("deleted", False)
+            nonlocal deleted
+            deleted = current is not None and not (
+                isinstance(current, dict) and current.get("deleted", False)
+            )
+            return {"value": None, "deleted": True} if deleted else current
+
+        await self.paxos.change(key, delete_fn)
+        return deleted
     
     async def exists(self, key: str) -> bool:
         """

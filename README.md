@@ -70,6 +70,10 @@ async def main():
 asyncio.run(main())
 ```
 
+`KeyValueStore.delete(key)` returns `True` only when it removes a live entry.
+Deleting a missing or already-deleted key returns `False`. A stored `None` is
+still a live entry, and `put` recreates a previously deleted key.
+
 ### Compare-And-Swap Operations
 
 ```python
