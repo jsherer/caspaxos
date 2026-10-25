@@ -171,3 +171,38 @@ class TestProposer:
         with pytest.raises(ValueError) as exc_info:
             proposer = Proposer("proposer1", acceptors, quorum_size=4)
         assert "Quorum size 4 > acceptors 3" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_other_keys_cannot_change_an_inflight_ballot(self):
+        prepared = asyncio.Event()
+        release = asyncio.Event()
+        seen = set()
+
+        class DelayedAcceptor(InMemoryAcceptor):
+            async def prepare(self, request):
+                response = await super().prepare(request)
+                if request.key == "counter" and request.ballot.node_id == "p":
+                    seen.add(self.node_id)
+                    if len(seen) == 3:
+                        prepared.set()
+                    await release.wait()
+                return response
+
+        acceptors = [DelayedAcceptor(str(i)) for i in range(3)]
+        proposer = Proposer("p", acceptors)
+        competitor = Proposer("z", acceptors)
+        pending = asyncio.create_task(
+            proposer.change("counter", lambda value: (value or 0) + 1)
+        )
+        try:
+            await asyncio.wait_for(prepared.wait(), 1)
+            await competitor.change("counter", lambda _: 10)
+            for key in ("other1", "other2", "other3"):
+                await proposer.change(key, lambda _: "unrelated")
+            release.set()
+            with pytest.raises(ProposerError):
+                await pending
+            assert await competitor.change("counter", lambda value: value) == 10
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)

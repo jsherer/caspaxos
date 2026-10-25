@@ -158,10 +158,12 @@ class Proposer:
         
         # Increment ballot for this round
         self.ballot = self.ballot.increment()
+        # Other keys may advance the proposer counter while this round awaits I/O.
+        ballot = BallotNumber(self.ballot.counter, self.node_id)
         
         # Send prepare requests to all acceptors
         prepare_requests = [
-            acceptor.prepare(PrepareRequest(key, self.ballot, extra))
+            acceptor.prepare(PrepareRequest(key, ballot, extra))
             for acceptor in self.acceptors
         ]
         
@@ -181,8 +183,8 @@ class Proposer:
                 accepted_value = response.value
         
         # Cache and return
-        self.cache[key] = (self.ballot, accepted_value)
-        return self.ballot, accepted_value
+        self.cache[key] = (ballot, accepted_value)
+        return ballot, accepted_value
     
     async def _accept_phase(
         self,

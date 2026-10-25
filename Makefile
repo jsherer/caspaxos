@@ -34,11 +34,11 @@ help:
 	@echo "  make example       # Run usage examples"
 	@echo "  make all           # Run everything"
 
-# Run all tests
+# Run the full suite, including unmarked async example tests
 .PHONY: test
 test:
 	@echo "Running CASPaxos tests..."
-	@$(PYTHON) -m pytest caspaxos/__tests__/ -q
+	@$(PYTHON) -m pytest --asyncio-mode=auto -q
 
 # Run tests with verbose output
 .PHONY: test-verbose
