@@ -7,9 +7,11 @@ accessed through a transport layer.
 
 import asyncio
 from copy import deepcopy
+from math import isfinite
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from .ballot import BallotNumber
 from .messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
+from .quorum import collect_responses
 from ..storage.acceptor import Acceptor
 from ..transport.base import Transport
 from ..transport.proxy import RemoteAcceptor
@@ -47,7 +49,8 @@ class EnhancedProposer:
         acceptors: Optional[List[Acceptor]] = None,
         transport: Optional[Transport] = None,
         remote_acceptor_ids: Optional[List[str]] = None,
-        quorum_size: Optional[int] = None
+        quorum_size: Optional[int] = None,
+        phase_timeout: float = 5.0
     ):
         """
         Initialize the enhanced proposer.
@@ -58,6 +61,7 @@ class EnhancedProposer:
             transport: Transport layer for remote acceptors (optional)
             remote_acceptor_ids: IDs of remote acceptors (optional)
             quorum_size: Size of quorum needed (default: majority)
+            phase_timeout: Positive finite deadline in seconds for each protocol phase
         """
         self.node_id = node_id
         self.transport = transport
@@ -83,6 +87,10 @@ class EnhancedProposer:
         
         if self.quorum_size > len(self.acceptors):
             raise ValueError(f"Quorum size {self.quorum_size} > acceptors {len(self.acceptors)}")
+
+        if not isfinite(phase_timeout) or phase_timeout <= 0:
+            raise ValueError("phase_timeout must be positive and finite")
+        self.phase_timeout = phase_timeout
         
         # Track ballot numbers per key
         self.ballot_counters: Dict[str, int] = {}
@@ -123,7 +131,12 @@ class EnhancedProposer:
         
         # Send prepare requests to all acceptors concurrently
         tasks = [acceptor.prepare(request) for acceptor in self.acceptors]
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        responses = await collect_responses(
+            tasks,
+            self.quorum_size,
+            lambda response: isinstance(response, PrepareResponse) and response.is_prepared,
+            self.phase_timeout,
+        )
         
         # Count successful promises
         promises = []
@@ -178,7 +191,12 @@ class EnhancedProposer:
         
         # Send accept requests to all acceptors concurrently
         tasks = [acceptor.accept(request) for acceptor in self.acceptors]
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        responses = await collect_responses(
+            tasks,
+            self.quorum_size,
+            lambda response: isinstance(response, AcceptResponse) and response.is_ok,
+            self.phase_timeout,
+        )
         
         # Count successful accepts
         accepts = []

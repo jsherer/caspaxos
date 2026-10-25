@@ -24,7 +24,8 @@ class CASPaxos:
         self,
         node_id: str = "node1",
         acceptors: Optional[List[Acceptor]] = None,
-        num_acceptors: int = 3
+        num_acceptors: int = 3,
+        phase_timeout: float = 5.0
     ):
         """
         Initialize CASPaxos instance.
@@ -33,6 +34,7 @@ class CASPaxos:
             node_id: Unique identifier for this node
             acceptors: List of acceptor instances (creates in-memory if None)
             num_acceptors: Number of in-memory acceptors to create if acceptors is None
+            phase_timeout: Positive finite deadline in seconds for each protocol phase
         """
         self.node_id = node_id
         
@@ -46,7 +48,7 @@ class CASPaxos:
             self.acceptors = acceptors
         
         # Create proposer
-        self.proposer = Proposer(node_id, self.acceptors)
+        self.proposer = Proposer(node_id, self.acceptors, phase_timeout=phase_timeout)
     
     async def change(
         self,

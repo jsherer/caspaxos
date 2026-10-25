@@ -244,6 +244,26 @@ PYTHONPATH=/app env/bin/python -m caspaxos.caspaxos.example
 - **Caching**: Proposers cache accepted values to avoid unnecessary prepare phases
 - **Quorum**: Default majority quorum (N/2 + 1) for N acceptors
 
+### Quorum Completion and Timeouts
+
+Both proposers finish each prepare or accept phase as soon as a quorum succeeds.
+They also stop early when the remaining requests cannot form a quorum.
+A stalled minority no longer prevents progress.
+
+`CASPaxos`, `Proposer`, and `EnhancedProposer` accept a positive, finite
+`phase_timeout` in seconds, defaulting to `5.0`. It bounds each phase, not the
+whole change operation; enhanced proposer prepare retries each get a new
+deadline. For example, `CASPaxos(phase_timeout=0.5)` uses a half-second deadline
+for each prepare or accept phase.
+
+Outstanding requests are cancelled on completion, failure, deadline expiry, or
+caller cancellation. Phase completion does not wait for slow cancellation
+cleanup; late results and exceptions are collected without changing the returned
+outcome. Cancellation is not a rollback: an accept may already have persisted.
+Custom acceptors and transports must yield during I/O and honor cancellation to
+release resources; requests that delay cancellation remain tracked until they
+finish.
+
 ### Mutable Values
 
 Values must support `copy.deepcopy`, including independent copies of mutable

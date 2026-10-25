@@ -7,9 +7,11 @@ prepare and accept phases to achieve consensus on values.
 
 import asyncio
 from copy import deepcopy
+from math import isfinite
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .ballot import BallotNumber
 from .messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
+from .quorum import collect_responses
 from ..storage.acceptor import Acceptor
 
 
@@ -43,7 +45,8 @@ class Proposer:
         self,
         node_id: str,
         acceptors: List[Acceptor],
-        quorum_size: Optional[int] = None
+        quorum_size: Optional[int] = None,
+        phase_timeout: float = 5.0
     ):
         """
         Initialize the proposer.
@@ -52,6 +55,7 @@ class Proposer:
             node_id: Unique identifier for this proposer
             acceptors: List of acceptor instances
             quorum_size: Size of quorum needed (default: majority)
+            phase_timeout: Positive finite deadline in seconds for each protocol phase
         """
         self.node_id = node_id
         self.acceptors = acceptors
@@ -59,6 +63,10 @@ class Proposer:
         
         if self.quorum_size > len(acceptors):
             raise ValueError(f"Quorum size {self.quorum_size} > acceptors {len(acceptors)}")
+
+        if not isfinite(phase_timeout) or phase_timeout <= 0:
+            raise ValueError("phase_timeout must be positive and finite")
+        self.phase_timeout = phase_timeout
         
         # Current ballot for this proposer
         self.ballot = BallotNumber(0, node_id)
@@ -252,8 +260,9 @@ class Proposer:
         Raises:
             InsufficientQuorumError: If quorum cannot be reached
         """
-        # Gather all responses, handling errors
-        responses = await asyncio.gather(*requests, return_exceptions=True)
+        responses = await collect_responses(
+            requests, self.quorum_size, success_predicate, self.phase_timeout
+        )
         
         # Separate successful and failed responses
         successful = []
