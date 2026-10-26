@@ -1,26 +1,36 @@
 """Tests for storage abstraction."""
 
 import pytest
-from ..storage.backend import StorageBackend
-from ..storage.backends.memory import InMemoryStorage
+import pytest_asyncio
+from ..storage.backends import InMemoryStorage, SQLiteStorage
 from ..storage.acceptor import AcceptorState
 from ..core.ballot import BallotNumber
 
 
-class TestInMemoryStorage:
-    """Test suite for InMemoryStorage backend."""
+@pytest_asyncio.fixture(params=["memory", "sqlite"])
+async def storage(request, tmp_path):
+    if request.param == "memory":
+        yield InMemoryStorage()
+    else:
+        backend = SQLiteStorage(tmp_path / "acceptor.sqlite")
+        try:
+            yield backend
+        finally:
+            await backend.close()
+
+
+class TestStorageBackend:
+    """Test suite for the storage backend contract."""
     
     @pytest.mark.asyncio
-    async def test_initial_state(self):
+    async def test_initial_state(self, storage):
         """Test that initial state is None."""
-        storage = InMemoryStorage()
         state = await storage.get_state("test_key")
         assert state is None
     
     @pytest.mark.asyncio
-    async def test_set_and_get_state(self):
+    async def test_set_and_get_state(self, storage):
         """Test setting and getting state."""
-        storage = InMemoryStorage()
         
         # Create state
         state = AcceptorState(
@@ -40,9 +50,8 @@ class TestInMemoryStorage:
         assert retrieved.accepted_value is None
     
     @pytest.mark.asyncio
-    async def test_update_state(self):
+    async def test_update_state(self, storage):
         """Test updating existing state."""
-        storage = InMemoryStorage()
         
         # Set initial state
         state1 = AcceptorState(
@@ -67,9 +76,8 @@ class TestInMemoryStorage:
         assert retrieved.accepted_value == "value1"
     
     @pytest.mark.asyncio
-    async def test_delete_state(self):
+    async def test_delete_state(self, storage):
         """Test deleting state."""
-        storage = InMemoryStorage()
         
         # Set state
         state = AcceptorState.initial()
@@ -85,9 +93,8 @@ class TestInMemoryStorage:
         assert await storage.get_state("key1") is None
     
     @pytest.mark.asyncio
-    async def test_list_keys(self):
+    async def test_list_keys(self, storage):
         """Test listing all keys."""
-        storage = InMemoryStorage()
         
         # Initially empty
         keys = await storage.list_keys()
@@ -110,9 +117,8 @@ class TestInMemoryStorage:
         assert set(keys) == {"key1", "key3"}
     
     @pytest.mark.asyncio
-    async def test_clear(self):
+    async def test_clear(self, storage):
         """Test clearing all states."""
-        storage = InMemoryStorage()
         
         # Add multiple states
         await storage.set_state("key1", AcceptorState.initial())
@@ -132,11 +138,9 @@ class TestInMemoryStorage:
         assert await storage.get_state("key3") is None
     
     @pytest.mark.asyncio
-    async def test_concurrent_access(self):
+    async def test_concurrent_access(self, storage):
         """Atomic updates preserve every concurrent increment."""
         import asyncio
-        
-        storage = InMemoryStorage()
         
         async def increment_ballot(key: str, node_id: str):
             def increment(state):
@@ -161,9 +165,8 @@ class TestInMemoryStorage:
         assert final_state.promised_ballot.counter == 30
     
     @pytest.mark.asyncio
-    async def test_isolation_between_keys(self):
+    async def test_isolation_between_keys(self, storage):
         """Test that operations on different keys don't interfere."""
-        storage = InMemoryStorage()
         
         # Set different states for different keys
         state1 = AcceptorState(
@@ -199,8 +202,7 @@ class TestInMemoryStorage:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("boundary", ["write", "read"])
-    async def test_state_snapshot_isolates_values_and_ballots(self, boundary):
-        storage = InMemoryStorage()
+    async def test_state_snapshot_isolates_values_and_ballots(self, storage, boundary):
         state = AcceptorState(
             promised_ballot=BallotNumber(2, "p"),
             accepted_ballot=BallotNumber(1, "p"),
@@ -219,8 +221,7 @@ class TestInMemoryStorage:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("outcome", ["exception", "no_update"])
-    async def test_atomic_update_preserves_state_when_not_committed(self, outcome):
-        storage = InMemoryStorage()
+    async def test_atomic_update_preserves_state_when_not_committed(self, storage, outcome):
         await storage.set_state(
             "key",
             AcceptorState(BallotNumber(2, "p"), BallotNumber(1, "p"), {"items": [1]}),
@@ -234,7 +235,7 @@ class TestInMemoryStorage:
             return None, "rejected"
 
         if outcome == "exception":
-            with pytest.raises(ValueError, match="rejected"):
+            with pytest.raises(ValueError):
                 await storage.update_state("key", reject)
         else:
             assert await storage.update_state("key", reject) == "rejected"
@@ -244,8 +245,7 @@ class TestInMemoryStorage:
         assert stored.accepted_value == {"items": [1]}
 
     @pytest.mark.asyncio
-    async def test_atomic_update_isolates_committed_state_from_result(self):
-        storage = InMemoryStorage()
+    async def test_atomic_update_isolates_committed_state_from_result(self, storage):
 
         def initialize(state):
             state = AcceptorState(

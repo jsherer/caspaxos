@@ -10,6 +10,7 @@ A clean, educational Python implementation of the CASPaxos consensus protocol. C
 - **Modular Design**: Separate acceptor, proposer, and storage components
 - **Async/Await**: Built on Python's asyncio for concurrent operations
 - **In-Memory Storage**: Default in-memory acceptors for development and testing
+- **SQLite Storage**: Opt-in durable acceptor state using the standard library
 - **Thread-Safe**: Per-key locking ensures consistency
 
 ## Installation
@@ -48,6 +49,71 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Durable SQLite Storage
+
+The default acceptors remain in-memory. Use `SQLiteStorage(path, *, timeout=5.0)`
+with `BaseAcceptor` for durable state; no additional dependencies are required.
+Reopen the same files after restarting the application:
+
+```python
+import asyncio
+from contextlib import AsyncExitStack
+from pathlib import Path
+
+from caspaxos import CASPaxos
+from caspaxos.acceptor import BaseAcceptor
+from caspaxos.storage.backends import SQLiteStorage
+
+async def main():
+    directory = Path("caspaxos-data")
+    directory.mkdir(exist_ok=True)
+    async with AsyncExitStack() as stack:
+        acceptors = []
+        for node_id in ("a", "b", "c"):
+            storage = await stack.enter_async_context(
+                SQLiteStorage(directory / f"{node_id}.sqlite")
+            )
+            acceptors.append(BaseAcceptor(node_id, storage))
+
+        paxos = CASPaxos("p", acceptors=acceptors)
+        print(await paxos.change("counter", lambda value: (value or 0) + 1))
+
+asyncio.run(main())
+```
+
+Each run increments the persisted counter. Use one database file per logical
+acceptor, not per proposer. Different acceptor identities must not share one
+file and then be counted as independent quorum participants. Three files on
+one host do not protect against loss of that host or disk.
+
+SQLite commits complete state—promised ballot, accepted ballot, and accepted
+value—before acknowledging a write. It uses WAL mode with `synchronous=FULL`;
+durability depends on the filesystem and hardware honoring synchronization.
+Use local storage that supports SQLite WAL, not a network filesystem.
+`:memory:` databases are rejected because they cannot provide this WAL-backed
+durability.
+
+`update_state` uses `BEGIN IMMEDIATE` to serialize transitions across connections
+and processes. SQLite permits one writer per database at a time, including
+updates to different keys. SQLite I/O and storage transition callbacks run in
+a dedicated worker thread; these callbacks must not depend on an asyncio event
+loop. Application callbacks passed to `CASPaxos.change` still run on the event
+loop. `timeout` bounds SQLite lock waits, independently of proposer phase timeouts.
+
+**Only open trusted database files.** State is serialized with Python pickle;
+loading a malicious pickle can execute arbitrary code. Values must be pickleable
+as well as supporting the API's `deepcopy` isolation contract. Reopening files
+requires compatible Python classes for stored objects.
+
+The caller owns storage lifetime: use `async with` or `await storage.close()`.
+Close drains submitted work before closing the connection. Cancellation of an
+operation does not undo its submitted work, which may still commit; cancelling
+a close waiter does not stop cleanup, and another `close()` can await completion.
+Do not copy only the main database file while it is open: committed data can
+still reside in its WAL. Use SQLite's backup facilities or close all connections
+before copying. Deleting or clearing a live acceptor's state discards promises
+and can break consensus safety.
 
 ### Local and Remote Acceptors
 
@@ -467,7 +533,7 @@ deduplication.
 ### Limitations
 
 - **Single Machine**: Current implementation runs on a single machine
-- **No Persistence**: In-memory acceptors lose state on restart
+- **Default Volatile Storage**: In-memory acceptors lose state on restart; opt into SQLite for persistence
 - **No Network**: Acceptors communicate via method calls, not network
 - **No Reconfiguration**: Static acceptor membership
 
