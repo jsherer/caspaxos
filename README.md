@@ -102,7 +102,7 @@ I/O rather than silently being interpreted as metadata.
 
 `get(key, *, retries=10)` instead bounds total read attempts across both phases.
 Failed reads prepare afresh before retrying; exhausting the budget raises
-`MAX_RETRIES`. The asynchronous and synchronous `CASPaxos` wrappers expose the
+`MaxRetriesError`. The asynchronous and synchronous `CASPaxos` wrappers expose the
 same read budget.
 
 ### Key-Value Store
@@ -344,7 +344,7 @@ including ballots and nested values. Custom storage backends must provide the
 same ownership isolation. If an update callback raises, the proposer attempts
 to commit the unchanged value. A confirmed quorum then raises `ProposerError`
 with `code == "UpdateError"` and the original exception as its cause. If that
-accept cannot be confirmed, it reports `INDETERMINATE` instead. Other unexpected
+accept cannot be confirmed, it reports `CommitError` instead. Other unexpected
 exceptions are wrapped with `code == "UnexpectedError"`.
 
 ### Atomic Acceptor Transitions
@@ -364,6 +364,22 @@ The in-memory backend holds a per-key asyncio lock across the transition and
 snapshot write; unrelated keys remain independent. Locks are retained across
 deletion and clearing so queued operations keep using the same lock.
 
+### Proposer Error Codes
+
+Protocol operations raise `caspaxos.core.ProposerError` with a CamelCase `code`:
+
+| Code | Meaning |
+| --- | --- |
+| `CommitError` | A write's accept quorum was not confirmed. The write may already have been applied; this is not a rollback guarantee. |
+| `MaxRetriesError` | The write's prepare budget or the read's shared attempt budget was exhausted. |
+| `UpdateError` | The update callback raised, and the unchanged value was committed. The callback exception is available through `__cause__`. |
+| `UnexpectedError` | An unexpected exception was wrapped with its original cause. This does not guarantee rollback or retry safety. |
+
+`CommitError` restores the original code used by existing write-error handlers.
+Applications using the interim codes must replace `INDETERMINATE` with
+`CommitError` and `MAX_RETRIES` with `MaxRetriesError`. These are canonical
+string values, not aliases; `UpdateError` and `UnexpectedError` are unchanged.
+
 ### Read Retries
 
 `get` retries failed prepares and unconfirmed accepts, including conflicts, lost
@@ -373,7 +389,7 @@ current value again; it never reuses a value captured before an intervening writ
 The `retries` argument is one shared attempt budget: an attempt performs a
 prepare and, if preparation succeeds, an accept. Prepare failures and accept
 failures both consume an attempt; there are no nested retry budgets. Exhaustion
-raises `ProposerError` with `code == "MAX_RETRIES"`, meaning no read result was
+raises `ProposerError` with `code == "MaxRetriesError"`, meaning no read result was
 obtained, not that a client update has an indeterminate outcome. Caller
 cancellation propagates rather than triggering another attempt.
 
@@ -395,9 +411,9 @@ apply it exactly once.
 
 `change(..., retries=10)` retries only preparation, before applying the update
 or sending accept requests. Exhausting the prepare budget raises
-`caspaxos.core.ProposerError` with `code == "MAX_RETRIES"`. If an accept quorum
+`caspaxos.core.ProposerError` with `code == "MaxRetriesError"`. If an accept quorum
 cannot be confirmed, it raises the same exception type with
-`code == "INDETERMINATE"` and does not reapply the update. This includes accept
+`code == "CommitError"` and does not reapply the update. This includes accept
 conflicts: other replicas may already have accepted the proposed value.
 A confirmed quorum still succeeds when a minority of responses are lost.
 

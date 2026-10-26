@@ -14,7 +14,12 @@ from ..transport.proxy import RemoteAcceptor
 
 
 class ProposerError(Exception):
-    """A failed preparation, indeterminate accept, or rejected update."""
+    """A failed preparation, indeterminate accept, or rejected update.
+
+    Protocol operations emit CommitError, MaxRetriesError, UpdateError, or
+    UnexpectedError in code. CommitError does not imply rollback: the write
+    may already have been accepted.
+    """
 
     def __init__(self, code: str, message: str = ""):
         super().__init__(message or code)
@@ -97,8 +102,8 @@ class Proposer:
         """Apply an update once, after obtaining a current value and ballot.
 
         retries bounds prepare attempts, not accept attempts. An unconfirmed
-        accept raises ProposerError with code INDETERMINATE and is never replayed.
-        Exhausted preparation raises MAX_RETRIES. A callback exception commits
+        accept raises ProposerError with code CommitError and is never replayed.
+        Exhausted preparation raises MaxRetriesError. A callback exception commits
         the unchanged value, then raises UpdateError with the original cause.
         Other unexpected errors use UnexpectedError; cancellation propagates.
 
@@ -141,7 +146,7 @@ class Proposer:
                                 # Even a constant write may have been observed
                                 # before another writer replaced it.
                                 raise ProposerError(
-                                    "INDETERMINATE",
+                                    "CommitError",
                                     "Accept quorum was not confirmed; the update may have been applied",
                                 ) from error
                             last_error = error
@@ -158,7 +163,7 @@ class Proposer:
                         delay = 0.01 * (2 ** attempt) if conflicted else 0.1
                         await asyncio.sleep(delay)
                 raise ProposerError(
-                    "MAX_RETRIES",
+                    "MaxRetriesError",
                     f"Failed after {retries} attempts. Last error: {last_error}",
                 ) from last_error
             except ProposerError:
@@ -226,14 +231,14 @@ class Proposer:
         """Read through consensus, retrying failed phases with a fresh prepare.
 
         retries bounds total prepare/accept attempts, not separate nested budgets.
-        Exhaustion raises MAX_RETRIES, not an indeterminate write outcome.
+        Exhaustion raises MaxRetriesError, not an indeterminate write outcome.
         """
         return await self._change(
             key, lambda value: value, None, retries, retry_accept=True
         )
 
     async def put(self, key: str, value: Any) -> Any:
-        """Replace a value; unconfirmed accepts raise INDETERMINATE without replay."""
+        """Replace a value; unconfirmed accepts raise CommitError without replay."""
         return await self.change(key, lambda _: value)
 
     async def compare_and_swap(

@@ -60,7 +60,7 @@ async def test_phase_deadline_fails_when_a_quorum_stalls(phase):
         await asyncio.wait_for(
             proposer.change("key", lambda value: (value or 0) + 1, retries=1), 0.5
         )
-    assert error.value.code == ("INDETERMINATE" if phase == "accept" else "MAX_RETRIES")
+    assert error.value.code == ("CommitError" if phase == "accept" else "MaxRetriesError")
     for acceptor in stalled:
         await asyncio.wait_for(acceptor.stopped.wait(), 0.5)
 
@@ -79,7 +79,7 @@ async def test_impossible_quorum_does_not_wait_for_remaining_call(phase):
         await asyncio.wait_for(
             proposer.change("key", lambda _: "value", retries=1), 0.5
         )
-    assert error.value.code == ("INDETERMINATE" if phase == "accept" else "MAX_RETRIES")
+    assert error.value.code == ("CommitError" if phase == "accept" else "MaxRetriesError")
     await asyncio.wait_for(stalled.stopped.wait(), 0.5)
 
 
@@ -150,7 +150,7 @@ async def test_read_deadline_exhaustion_reports_no_result(phase):
     reader = Proposer("reader", acceptors, phase_timeout=0.02)
     with pytest.raises(ProposerError) as error:
         await asyncio.wait_for(reader.get("key", retries=1), 0.5)
-    assert error.value.code == "MAX_RETRIES"
+    assert error.value.code == "MaxRetriesError"
     for acceptor in acceptors:
         await asyncio.wait_for(acceptor.stopped.wait(), 0.5)
 

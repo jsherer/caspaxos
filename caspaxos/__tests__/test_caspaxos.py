@@ -94,7 +94,7 @@ class TestCASPaxos:
         # Should raise ProposerError with update error
         with pytest.raises(ProposerError) as exc_info:
             await paxos.change("key1", bad_update)
-        assert "UpdateError" in str(exc_info.value.code)
+        assert exc_info.value.code == "UpdateError"
         
         # Value should remain unchanged
         assert await paxos.get("key1") == "initial"
@@ -177,7 +177,7 @@ class TestCASPaxos:
                 await transport.unregister_acceptor(node)
             with pytest.raises(ProposerError) as error:
                 await paxos.change("key", lambda _: {"value": 4}, retries=1)
-            assert error.value.code == "MAX_RETRIES"
+            assert error.value.code == "MaxRetriesError"
         finally:
             await transport.close()
 

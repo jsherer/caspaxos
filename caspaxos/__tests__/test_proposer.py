@@ -173,7 +173,7 @@ class TestProposer:
             else:
                 with pytest.raises(ProposerError) as error:
                     await pending
-                assert error.value.code == "INDETERMINATE"
+                assert error.value.code == "CommitError"
         finally:
             if not pending.done():
                 pending.cancel()
@@ -256,7 +256,7 @@ class TestProposer:
         else:
             with pytest.raises(ProposerError) as error:
                 await proposer.change("counter", increment)
-            assert error.value.code == "INDETERMINATE"
+            assert error.value.code == "CommitError"
 
         assert calls == 1
         recovered = await proposer.get("counter")
@@ -314,7 +314,7 @@ class TestProposer:
             else:
                 with pytest.raises(ProposerError) as error:
                     await asyncio.wait_for(pending, 1)
-                assert error.value.code == "INDETERMINATE"
+                assert error.value.code == "CommitError"
             assert await Proposer("z", acceptors).get("key") == "B"
         finally:
             release.set()
@@ -348,7 +348,7 @@ class TestProposer:
         if retries < 3:
             with pytest.raises(ProposerError) as error:
                 await reader.get("key", retries=retries)
-            assert error.value.code == "MAX_RETRIES"
+            assert error.value.code == "MaxRetriesError"
         else:
             assert await reader.get("key", retries=retries) == "current"
 
@@ -441,7 +441,7 @@ class TestProposer:
         newcomer = Proposer("new", acceptors)
         with pytest.raises(ProposerError) as error:
             await newcomer.change("counter", lambda value: value + 1)
-        assert error.value.code == "INDETERMINATE"
+        assert error.value.code == "CommitError"
         # Accept conflicts still must not replay the failed update. They only
         # advance the ballot for an operation explicitly requested by the caller.
         assert await newcomer.change("counter", lambda value: value, retries=1) == 7
