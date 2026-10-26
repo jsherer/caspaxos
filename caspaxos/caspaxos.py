@@ -65,8 +65,8 @@ class CASPaxos:
         self,
         key: str,
         update_fn: Callable[[Optional[Any]], Any],
-        extra: Optional[Any] = None,
         *,
+        extra: Optional[Any] = None,
         retries: int = 10
     ) -> Any:
         """
@@ -80,8 +80,8 @@ class CASPaxos:
         Args:
             key: The key to operate on
             update_fn: Function that takes current value and returns new value
-            extra: Optional data forwarded to protocol requests
-            retries: Maximum prepare attempts; uncertain accepts are never retried
+            extra: Keyword-only data forwarded to protocol requests
+            retries: Keyword-only maximum prepare attempts; uncertain accepts are never retried
             
         Returns:
             The new value after applying update_fn
@@ -89,7 +89,7 @@ class CASPaxos:
         Raises:
             ProposerError: If consensus cannot be reached
         """
-        return await self.proposer.change(key, update_fn, extra, retries=retries)
+        return await self.proposer.change(key, update_fn, extra=extra, retries=retries)
     
     async def get(self, key: str, *, retries: int = 10) -> Optional[Any]:
         """

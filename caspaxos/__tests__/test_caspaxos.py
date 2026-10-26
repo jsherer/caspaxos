@@ -3,7 +3,7 @@
 import pytest
 import asyncio
 from .. import CASPaxos, KeyValueStore, CASKeyValue
-from ..core import ProposerError
+from ..core import Proposer, ProposerError
 from ..acceptor import BaseAcceptor
 from ..transport.direct import DirectTransport
 
@@ -180,6 +180,15 @@ class TestCASPaxos:
             assert error.value.code == "MAX_RETRIES"
         finally:
             await transport.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api", [Proposer, CASPaxos])
+    async def test_change_rejects_ambiguous_positional_options(self, api):
+        client = api("p", acceptors=[BaseAcceptor(str(i)) for i in range(3)])
+        await client.put("key", "original")
+        with pytest.raises(TypeError):
+            await client.change("key", lambda _: "unexpected", 3)
+        assert await client.get("key") == "original"
 
     def test_remote_cluster_requires_transport(self):
         with pytest.raises(ValueError):

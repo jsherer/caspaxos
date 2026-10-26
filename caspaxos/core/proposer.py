@@ -90,8 +90,8 @@ class Proposer:
         self,
         key: str,
         update_fn: Callable[[Optional[Any]], Any],
-        extra: Optional[Any] = None,
         *,
+        extra: Optional[Any] = None,
         retries: int = 10,
     ) -> Any:
         """Apply an update once, after obtaining a current value and ballot.
@@ -103,6 +103,7 @@ class Proposer:
         Other unexpected errors use UnexpectedError; cancellation propagates.
 
         Values are isolated snapshots. extra is forwarded to protocol requests.
+        Both extra and retries are keyword-only.
         """
         return await self._change(key, update_fn, extra, retries)
 

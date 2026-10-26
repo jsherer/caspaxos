@@ -92,9 +92,13 @@ The caller owns the transport and must close it. `CASPaxos` accepts the same
 options. It creates default local acceptors only when neither local acceptors
 nor remote IDs are supplied; a remote-only cluster gets no implicit local replicas.
 
-Both APIs support `change(key, update_fn, extra=None, *, retries=10)`.
+Both APIs support `change(key, update_fn, *, extra=None, retries=10)`.
 `extra` is forwarded to protocol requests; `retries` bounds prepare attempts,
 not accept attempts. The versioned `CASKeyValue.read` / `write` API is unchanged.
+Both optional arguments must be named: use `retries=3` for a prepare-attempt
+budget or `extra=metadata` for protocol extension data. A third positional
+argument, such as `change(key, update_fn, 3)`, raises `TypeError` before protocol
+I/O rather than silently being interpreted as metadata.
 
 `get(key, *, retries=10)` instead bounds total read attempts across both phases.
 Failed reads prepare afresh before retrying; exhausting the budget raises
