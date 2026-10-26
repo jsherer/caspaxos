@@ -328,6 +328,11 @@ The proposer finishes each prepare or accept phase as soon as a quorum succeeds.
 It also stops early when the remaining requests cannot form a quorum.
 A stalled minority no longer prevents progress.
 
+The quorum collector classifies protocol responses once and returns both the
+completed responses and the classified successes. The proposer uses that same
+success list rather than evaluating the success predicate again. Conflict and
+error responses remain available for ballot advancement and failure diagnostics.
+
 `CASPaxos` and `Proposer` accept a positive, finite `phase_timeout` in seconds,
 defaulting to `5.0`. It bounds each phase, not the whole change operation;
 each phase of each retry gets a new deadline. For example,

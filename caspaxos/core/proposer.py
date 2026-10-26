@@ -211,18 +211,15 @@ class Proposer:
         requests: List[Awaitable[Any]],
         success_predicate: Callable[[Any], bool],
     ) -> List[Any]:
-        responses = await collect_responses(
+        responses, successful = await collect_responses(
             requests, self.quorum_size, success_predicate, self.phase_timeout
         )
-        successful = []
         for response in responses:
             if isinstance(response, (PrepareResponse, AcceptResponse)):
                 if response.is_conflict and response.ballot is not None:
                     self.ballot_counters[key] = max(
                         self.ballot_counters.get(key, 0), response.ballot.counter
                     )
-                if success_predicate(response):
-                    successful.append(response)
         if len(successful) < self.quorum_size:
             raise InsufficientQuorumError(responses)
         return successful
