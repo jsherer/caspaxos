@@ -239,6 +239,17 @@ async def concurrent_increments():
 
 ## Testing
 
+Regression tests check quorum behavior at the acceptance boundary: majority
+quorums for three-, four-, and five-replica clusters, plus a custom four-of-five
+quorum. Both protocol phases must reject one-too-few available replicas and
+succeed once the threshold is reached.
+
+Mixed-cluster tests verify that every pair of participants can form a quorum,
+that two outages cannot shrink membership to a single-replica quorum, and that
+recovery preserves the confirmed value. Partial-accept and cancellation tests
+also cover recovery after an earlier acknowledged write, without depending on
+private cache state.
+
 ### Using Make (Recommended)
 
 A Makefile is provided for convenience:

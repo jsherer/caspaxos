@@ -162,6 +162,8 @@ class TestProposer:
 
         acceptors = [FaultAcceptor(str(i)) for i in range(3)]
         proposer = Proposer("p", acceptors)
+        await proposer.put("key", "initial")
+        accepted.clear()
         acceptors[1].fail = acceptors[2].fail = True
         pending = asyncio.create_task(proposer.change("key", lambda _: "first"))
         try:

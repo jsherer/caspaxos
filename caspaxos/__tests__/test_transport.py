@@ -6,7 +6,7 @@ from ..transport.proxy import RemoteAcceptor
 from ..transport.base import TransportError
 from ..acceptor import BaseAcceptor
 from ..storage.backends.memory import InMemoryStorage
-from ..core import Proposer
+from ..core import Proposer, ProposerError
 from ..core.ballot import BallotNumber
 from ..core.messages import PrepareRequest, PrepareResponse, AcceptRequest, AcceptResponse
 
@@ -353,3 +353,53 @@ class TestTransportIntegration:
         
         # Clean up
         await transport.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("unavailable", ["local", "remote0", "remote1"])
+    async def test_mixed_cluster_keeps_membership_during_outages(self, unavailable):
+        class SwitchableAcceptor(BaseAcceptor):
+            available = True
+
+            async def prepare(self, request):
+                if not self.available:
+                    raise ConnectionError("replica unavailable")
+                return await super().prepare(request)
+
+            async def accept(self, request):
+                if not self.available:
+                    raise ConnectionError("replica unavailable")
+                return await super().accept(request)
+
+        transport = DirectTransport()
+        replicas = {
+            node_id: SwitchableAcceptor(node_id)
+            for node_id in ("local", "remote0", "remote1")
+        }
+        try:
+            for node_id in ("remote0", "remote1"):
+                replica = replicas[node_id]
+                await transport.register_acceptor(node_id, replica.prepare, replica.accept)
+            proposer = Proposer(
+                "p",
+                acceptors=[replicas["local"]],
+                transport=transport,
+                remote_acceptor_ids=["remote0", "remote1"],
+            )
+            replicas[unavailable].available = False
+            survivors = [
+                replica for node_id, replica in replicas.items() if node_id != unavailable
+            ]
+            assert await proposer.change("key", lambda _: "confirmed", retries=1) == "confirmed"
+            for replica in survivors:
+                assert (await replica.get_state("key")).accepted_value == "confirmed"
+
+            # A second outage must not shrink the configured quorum to one.
+            survivors[0].available = False
+            with pytest.raises(ProposerError) as error:
+                await proposer.change("key", lambda _: "unconfirmed", retries=1)
+            assert error.value.code == "MaxRetriesError"
+
+            survivors[0].available = True
+            assert await proposer.get("key", retries=1) == "confirmed"
+        finally:
+            await transport.close()

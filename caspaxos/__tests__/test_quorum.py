@@ -53,6 +53,46 @@ async def test_healthy_quorum_does_not_wait_for_stalled_minority(phase):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "accept"])
+@pytest.mark.parametrize(
+    "size,configured_quorum,required",
+    [
+        pytest.param(3, None, 2, id="three-majority"),
+        pytest.param(4, None, 3, id="four-majority"),
+        pytest.param(5, None, 3, id="five-majority"),
+        pytest.param(5, 4, 4, id="five-custom-four"),
+    ],
+)
+async def test_quorum_threshold_applies_to_each_phase(size, configured_quorum, required, phase):
+    class SwitchableAcceptor(InMemoryAcceptor):
+        available = True
+
+        async def prepare(self, request):
+            if phase == "prepare" and not self.available:
+                raise ConnectionError("prepare unavailable")
+            return await super().prepare(request)
+
+        async def accept(self, request):
+            if phase == "accept" and not self.available:
+                raise ConnectionError("accept unavailable")
+            return await super().accept(request)
+
+    acceptors = [SwitchableAcceptor(str(i)) for i in range(size)]
+    proposer = Proposer("p", acceptors, quorum_size=configured_quorum)
+    for acceptor in acceptors[required - 1:]:
+        acceptor.available = False
+    with pytest.raises(ProposerError) as error:
+        await proposer.change("key", lambda _: "below quorum", retries=1)
+    assert error.value.code == ("MaxRetriesError" if phase == "prepare" else "CommitError")
+
+    # Bringing exactly one participant back crosses the required threshold.
+    acceptors[required - 1].available = True
+    assert await proposer.change("key", lambda _: "confirmed", retries=1) == "confirmed"
+    for acceptor in acceptors[:required]:
+        assert (await acceptor.get_state("key")).accepted_value == "confirmed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["prepare", "accept"])
 async def test_phase_deadline_fails_when_a_quorum_stalls(phase):
     stalled = [StalledAcceptor(str(i), phase) for i in range(2)]
     proposer = Proposer("p", [InMemoryAcceptor("healthy"), *stalled], phase_timeout=0.02)
