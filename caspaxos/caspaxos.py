@@ -91,17 +91,18 @@ class CASPaxos:
         """
         return await self.proposer.change(key, update_fn, extra, retries=retries)
     
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str, *, retries: int = 10) -> Optional[Any]:
         """
         Read a value using identity update function.
         
         Args:
             key: The key to read
+            retries: Total read attempts, including fresh prepares after failed accepts
             
         Returns:
             Current value or None if key doesn't exist
         """
-        return await self.proposer.get(key)
+        return await self.proposer.get(key, retries=retries)
     
     async def put(self, key: str, value: Any) -> Any:
         """
@@ -317,10 +318,10 @@ class SyncCASPaxos:
         loop = self._get_loop()
         return loop.run_until_complete(self.paxos.change(key, update_fn))
     
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str, *, retries: int = 10) -> Optional[Any]:
         """Synchronous version of get."""
         loop = self._get_loop()
-        return loop.run_until_complete(self.paxos.get(key))
+        return loop.run_until_complete(self.paxos.get(key, retries=retries))
     
     def put(self, key: str, value: Any) -> Any:
         """Synchronous version of put."""

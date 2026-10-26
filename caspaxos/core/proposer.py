@@ -34,7 +34,7 @@ class Proposer:
 
     Updates on the same key are serialized locally. Each operation prepares a
     fresh ballot so writes by other proposers are observed before applying the
-    update. Only prepare failures are automatically retried.
+    update. Writes retry preparation only; reads may also retry failed accepts.
     """
 
     def __init__(
@@ -104,41 +104,62 @@ class Proposer:
 
         Values are isolated snapshots. extra is forwarded to protocol requests.
         """
+        return await self._change(key, update_fn, extra, retries)
+
+    async def _change(
+        self,
+        key: str,
+        update_fn: Callable[[Optional[Any]], Any],
+        extra: Optional[Any],
+        retries: int,
+        *,
+        retry_accept: bool = False,
+    ) -> Any:
+        """Run one shared attempt budget; only identity reads retry acceptance."""
         async with self._get_lock(key):
             try:
                 last_error = None
                 for attempt in range(retries):
                     try:
                         ballot, current_value = await self._prepare_phase(key, extra)
-                        break
                     except InsufficientQuorumError as error:
                         last_error = error
-                        if attempt + 1 < retries:
-                            conflicted = any(
-                                getattr(response, "is_conflict", False)
-                                for response in error.responses
-                            )
-                            delay = 0.01 * (2 ** attempt) if conflicted else 0.1
-                            await asyncio.sleep(delay)
-                else:
-                    raise ProposerError(
-                        "MAX_RETRIES",
-                        f"Failed after {retries} prepare attempts. Last error: {last_error}",
-                    ) from last_error
+                    else:
+                        update_error = None
+                        try:
+                            new_value = update_fn(deepcopy(current_value))
+                        except Exception as error:
+                            update_error = error
+                            new_value = current_value
+                        # Snapshot before request I/O can let callers mutate the result.
+                        new_value = deepcopy(new_value)
+                        try:
+                            await self._accept_phase(key, ballot, new_value, extra)
+                        except InsufficientQuorumError as error:
+                            if not retry_accept:
+                                # Even a constant write may have been observed
+                                # before another writer replaced it.
+                                raise ProposerError(
+                                    "INDETERMINATE",
+                                    "Accept quorum was not confirmed; the update may have been applied",
+                                ) from error
+                            last_error = error
+                        else:
+                            if update_error is not None:
+                                raise ProposerError("UpdateError", str(update_error)) from update_error
+                            return deepcopy(new_value)
 
-                update_error = None
-                try:
-                    new_value = update_fn(deepcopy(current_value))
-                except Exception as error:
-                    update_error = error
-                    new_value = current_value
-                # Snapshot before request I/O can let callers mutate the result.
-                new_value = deepcopy(new_value)
-                await self._accept_phase(key, ballot, new_value, extra)
-
-                if update_error is not None:
-                    raise ProposerError("UpdateError", str(update_error)) from update_error
-                return deepcopy(new_value)
+                    if attempt + 1 < retries:
+                        conflicted = any(
+                            getattr(response, "is_conflict", False)
+                            for response in last_error.responses
+                        )
+                        delay = 0.01 * (2 ** attempt) if conflicted else 0.1
+                        await asyncio.sleep(delay)
+                raise ProposerError(
+                    "MAX_RETRIES",
+                    f"Failed after {retries} attempts. Last error: {last_error}",
+                ) from last_error
             except ProposerError:
                 raise
             except Exception as error:
@@ -169,22 +190,14 @@ class Proposer:
         value: Any,
         extra: Optional[Any] = None,
     ) -> None:
-        # Acceptance may persist despite an error, timeout, or cancellation.
-        # Do not replay the update when its outcome cannot be confirmed.
-        try:
-            await self._wait_for_quorum(
-                key,
-                [
-                    acceptor.accept(AcceptRequest(key, ballot, value, ballot, extra))
-                    for acceptor in self.acceptors
-                ],
-                lambda response: isinstance(response, AcceptResponse) and response.is_ok,
-            )
-        except InsufficientQuorumError as error:
-            raise ProposerError(
-                "INDETERMINATE",
-                "Accept quorum was not confirmed; the update may have been applied",
-            ) from error
+        await self._wait_for_quorum(
+            key,
+            [
+                acceptor.accept(AcceptRequest(key, ballot, value, ballot, extra))
+                for acceptor in self.acceptors
+            ],
+            lambda response: isinstance(response, AcceptResponse) and response.is_ok,
+        )
 
     async def _wait_for_quorum(
         self,
@@ -208,12 +221,18 @@ class Proposer:
             raise InsufficientQuorumError(responses)
         return successful
 
-    async def get(self, key: str) -> Optional[Any]:
-        """Read a value through consensus using the identity update."""
-        return await self.change(key, lambda value: value)
+    async def get(self, key: str, *, retries: int = 10) -> Optional[Any]:
+        """Read through consensus, retrying failed phases with a fresh prepare.
+
+        retries bounds total prepare/accept attempts, not separate nested budgets.
+        Exhaustion raises MAX_RETRIES, not an indeterminate write outcome.
+        """
+        return await self._change(
+            key, lambda value: value, None, retries, retry_accept=True
+        )
 
     async def put(self, key: str, value: Any) -> Any:
-        """Replace a value through consensus."""
+        """Replace a value; unconfirmed accepts raise INDETERMINATE without replay."""
         return await self.change(key, lambda _: value)
 
     async def compare_and_swap(

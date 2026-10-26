@@ -141,3 +141,44 @@ async def test_late_accept_does_not_block_quorum_or_overwrite_newer_value():
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["prepare", "accept"])
+async def test_read_deadline_exhaustion_reports_no_result(phase):
+    acceptors = [StalledAcceptor(str(i), phase) for i in range(3)]
+    reader = Proposer("reader", acceptors, phase_timeout=0.02)
+    with pytest.raises(ProposerError) as error:
+        await asyncio.wait_for(reader.get("key", retries=1), 0.5)
+    assert error.value.code == "MAX_RETRIES"
+    for acceptor in acceptors:
+        await asyncio.wait_for(acceptor.stopped.wait(), 0.5)
+
+
+@pytest.mark.asyncio
+async def test_read_cancellation_stops_retried_accept_requests():
+    class RetryThenStallAcceptor(StalledAcceptor):
+        first_accept = True
+
+        async def accept(self, request):
+            if self.first_accept:
+                self.first_accept = False
+                raise ConnectionError("first attempt unavailable")
+            return await super().accept(request)
+
+    acceptors = [RetryThenStallAcceptor(str(i), "accept") for i in range(3)]
+    reader = Proposer("reader", acceptors)
+    pending = asyncio.create_task(reader.get("key", retries=3))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(acceptor.started.wait() for acceptor in acceptors)), 1
+        )
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await asyncio.wait_for(
+            asyncio.gather(*(acceptor.stopped.wait() for acceptor in acceptors)), 0.5
+        )
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)

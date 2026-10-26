@@ -96,6 +96,11 @@ Both APIs support `change(key, update_fn, extra=None, *, retries=10)`.
 `extra` is forwarded to protocol requests; `retries` bounds prepare attempts,
 not accept attempts. The versioned `CASKeyValue.read` / `write` API is unchanged.
 
+`get(key, *, retries=10)` instead bounds total read attempts across both phases.
+Failed reads prepare afresh before retrying; exhausting the budget raises
+`MAX_RETRIES`. The asynchronous and synchronous `CASPaxos` wrappers expose the
+same read budget.
+
 ### Key-Value Store
 
 ```python
@@ -310,7 +315,7 @@ A stalled minority no longer prevents progress.
 
 `CASPaxos` and `Proposer` accept a positive, finite `phase_timeout` in seconds,
 defaulting to `5.0`. It bounds each phase, not the whole change operation;
-prepare retries each get a new deadline. For example,
+each phase of each retry gets a new deadline. For example,
 `CASPaxos(phase_timeout=0.5)` uses a half-second deadline
 for each prepare or accept phase.
 
@@ -355,6 +360,19 @@ The in-memory backend holds a per-key asyncio lock across the transition and
 snapshot write; unrelated keys remain independent. Locks are retained across
 deletion and clearing so queued operations keep using the same lock.
 
+### Read Retries
+
+`get` retries failed prepares and unconfirmed accepts, including conflicts, lost
+replies, and phase deadlines. Each retry prepares a fresh ballot and obtains the
+current value again; it never reuses a value captured before an intervening write.
+
+The `retries` argument is one shared attempt budget: an attempt performs a
+prepare and, if preparation succeeds, an accept. Prepare failures and accept
+failures both consume an attempt; there are no nested retry budgets. Exhaustion
+raises `ProposerError` with `code == "MAX_RETRIES"`, meaning no read result was
+obtained, not that a client update has an indeterminate outcome. Caller
+cancellation propagates rather than triggering another attempt.
+
 ### Failed or Cancelled Writes
 
 Every `CASPaxos` / `Proposer` operation, including `get`, prepares a fresh ballot
@@ -363,8 +381,8 @@ cached. This avoids stale cached ballots when proposers alternate operations on
 the same key, at the cost of a prepare phase even for repeated accesses by one
 proposer. Accept requests promise only their current round's ballot.
 
-If acceptance fails or the operation is cancelled, the next explicitly requested
-operation also prepares afresh. A competing write between prepare and accept
+For writes, if acceptance fails or the operation is cancelled, the next explicitly
+requested operation prepares afresh. A competing write between prepare and accept
 can still cause an indeterminate outcome; the update is not automatically replayed.
 
 A failed or cancelled write may already have reached some acceptors; it is not
@@ -379,12 +397,18 @@ cannot be confirmed, it raises the same exception type with
 conflicts: other replicas may already have accepted the proposed value.
 A confirmed quorum still succeeds when a minority of responses are lost.
 
+`put` also does not retry an unconfirmed accept. A constant assignment is
+idempotent in isolation, but repeating it across another writer's update is not
+generally linearizable: `put(A)` may become visible, another writer may publish
+`B`, and retrying `put(A)` would restore `A`, making one logical write take effect
+twice. Read retries avoid this problem by obtaining the current value again.
+
 The proposer maintains per-key ballot counters and remembers the highest
 conflicting counter observed during either phase, including minority conflicts
 in a successful quorum. Its next ballot exceeds that counter while retaining its own node ID.
 Prepare retries therefore jump past observed promises rather than counting up
-one at a time. Accept conflicts still report an indeterminate outcome; the
-remembered counter is used by the next explicitly requested operation.
+one at a time. Write accept conflicts still report an indeterminate outcome;
+the remembered counter is used by the next explicit operation or automatic read retry.
 
 An indeterminate outcome does not mean the write failed. Recover with a
 consistent read and application-specific reconciliation rather than blindly

@@ -269,6 +269,90 @@ class TestProposer:
             assert recovered == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["get", "put"])
+    @pytest.mark.parametrize("failure", ["lost_reply", "conflict"])
+    async def test_accept_failure_refreshes_reads_but_does_not_replay_puts(
+        self, operation, failure
+    ):
+        reached = set()
+        ready = asyncio.Event()
+        release = asyncio.Event()
+
+        class InterruptedAcceptor(InMemoryAcceptor):
+            interrupted = False
+
+            async def accept(self, request):
+                if request.ballot.node_id == "client" and not self.interrupted:
+                    self.interrupted = True
+                    if failure == "lost_reply":
+                        await super().accept(request)
+                    reached.add(self.node_id)
+                    if len(reached) == 3:
+                        ready.set()
+                    await release.wait()
+                    if failure == "lost_reply":
+                        raise ConnectionError("accepted, but reply lost")
+                return await super().accept(request)
+
+        acceptors = [InterruptedAcceptor(str(i)) for i in range(3)]
+        await Proposer("a", acceptors).put("key", "initial")
+        client = Proposer("client", acceptors)
+        pending = asyncio.create_task(
+            client.get("key", retries=2) if operation == "get"
+            else client.put("key", "A")
+        )
+        try:
+            await asyncio.wait_for(ready.wait(), 1)
+            if operation == "put" and failure == "lost_reply":
+                # The first write is observable before B. Repeating A after B
+                # would make this one put take effect twice.
+                assert await Proposer("observer", acceptors).get("key") == "A"
+            await Proposer("writer", acceptors).put("key", "B")
+            release.set()
+            if operation == "get":
+                assert await asyncio.wait_for(pending, 1) == "B"
+            else:
+                with pytest.raises(ProposerError) as error:
+                    await asyncio.wait_for(pending, 1)
+                assert error.value.code == "INDETERMINATE"
+            assert await Proposer("z", acceptors).get("key") == "B"
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retries", [1, 2, 3])
+    async def test_read_retry_budget_spans_prepare_and_accept(self, retries):
+        class FaultAcceptor(InMemoryAcceptor):
+            failed_prepare = False
+            failed_accept = False
+
+            async def prepare(self, request):
+                if request.ballot.node_id == "reader" and not self.failed_prepare:
+                    self.failed_prepare = True
+                    raise ConnectionError("prepare unavailable")
+                return await super().prepare(request)
+
+            async def accept(self, request):
+                response = await super().accept(request)
+                if request.ballot.node_id == "reader" and not self.failed_accept:
+                    self.failed_accept = True
+                    raise ConnectionError("accept reply lost")
+                return response
+
+        acceptors = [FaultAcceptor(str(i)) for i in range(3)]
+        await Proposer("a", acceptors).put("key", "current")
+        reader = Proposer("reader", acceptors)
+        if retries < 3:
+            with pytest.raises(ProposerError) as error:
+                await reader.get("key", retries=retries)
+            assert error.value.code == "MAX_RETRIES"
+        else:
+            assert await reader.get("key", retries=retries) == "current"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failure", ["connection_error", "conflict"])
     async def test_prepare_failures_remain_retryable(self, failure):
         class FaultAcceptor(InMemoryAcceptor):
