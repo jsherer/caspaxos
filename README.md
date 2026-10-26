@@ -172,10 +172,10 @@ than reporting a comparison result. `CASPaxos.compare_and_swap` exposes the same
    - Manages prepare and accept phases
    - Maintains per-key locks for serialization
 
-3. **Acceptor** (`storage/acceptor.py`)
-   - Stores promised and accepted values
-   - Responds to prepare and accept requests
-   - In-memory and Redis implementations available
+3. **Acceptor** (`storage/acceptor.py`, `acceptor.py`)
+   - `Acceptor` defines the protocol interface and acceptor state
+   - `BaseAcceptor` implements atomic protocol transitions with pluggable storage
+   - `InMemoryAcceptor` (`storage/memory.py`) inherits that implementation and supplies its own `InMemoryStorage` backend
 
 4. **Messages** (`core/messages.py`)
    - PrepareRequest/Response
@@ -360,8 +360,11 @@ exceptions are wrapped with `code == "UnexpectedError"`.
 
 ### Atomic Acceptor Transitions
 
-Both acceptor implementations use `StorageBackend.update_state(key, transition)`
-to read state, evaluate the protocol rule, and persist the result atomically.
+`BaseAcceptor` implements prepare and accept using
+`StorageBackend.update_state(key, transition)` to read state, evaluate the
+protocol rule, and persist the result atomically. `InMemoryAcceptor` inherits
+these transitions and the state-access methods, supplying an independent
+in-memory backend for each instance rather than maintaining duplicate methods.
 The synchronous transition receives a detached state snapshot and returns
 `(replacement, result)`; a `None` replacement means no write. A transition that
 raises must leave stored state unchanged.
