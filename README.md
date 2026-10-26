@@ -351,9 +351,12 @@ finish.
 
 Values must support `copy.deepcopy`, including independent copies of mutable
 contents. Update functions receive detached values and may mutate and return
-them. The proposer snapshots the result before sending accept requests and
-returns a separate copy, so later caller mutations cannot change a proposal
-or accepted state.
+them; this preserves the previous value if a callback mutates its argument and
+then raises. The proposer snapshots the callback result before accept I/O so
+caller-owned objects cannot change a proposal while requests are pending.
+The returned value is a separate copy: quorum completion can leave minority
+accept requests running, and mutating a result must not change what those
+replicas eventually accept.
 
 The in-memory backend snapshots complete acceptor state on write and read,
 including ballots and nested values. Custom storage backends must provide the
@@ -372,7 +375,11 @@ these transitions and the state-access methods, supplying an independent
 in-memory backend for each instance rather than maintaining duplicate methods.
 The synchronous transition receives a detached state snapshot and returns
 `(replacement, result)`; a `None` replacement means no write. A transition that
-raises must leave stored state unchanged.
+raises must leave stored state unchanged. The in-memory backend snapshots both
+the transition input and the committed replacement. The first snapshot prevents
+mutations from leaking through failed or rejected transitions; the second
+prevents a retained transition result from mutating stored state. Simply
+removing either snapshot does not preserve the backend's ownership contract.
 
 Custom backends must implement this operation and serialize it against other
 writes to the same stored key, including access through multiple acceptors.

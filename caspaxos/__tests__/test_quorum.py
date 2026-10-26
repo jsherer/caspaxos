@@ -184,6 +184,44 @@ async def test_late_accept_does_not_block_quorum_or_overwrite_newer_value():
 
 
 @pytest.mark.asyncio
+async def test_returned_value_cannot_mutate_a_late_accept():
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+    finished = asyncio.Event()
+
+    class LateAcceptor(InMemoryAcceptor):
+        async def accept(self, request):
+            try:
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release.wait()
+                return await super().accept(request)
+            finally:
+                finished.set()
+
+    acceptors = [InMemoryAcceptor("a"), InMemoryAcceptor("b"), LateAcceptor("late")]
+    proposer = Proposer("p", acceptors)
+    pending = asyncio.create_task(proposer.put("key", {"items": [1]}))
+    try:
+        done, _ = await asyncio.wait([pending], timeout=0.5)
+        assert pending in done, "a healthy quorum waited for the late replica"
+        result = await pending
+        await asyncio.wait_for(cancelled.wait(), 0.5)
+        result["items"].append(2)
+        release.set()
+        await asyncio.wait_for(finished.wait(), 0.5)
+        for acceptor in acceptors:
+            assert (await acceptor.get_state("key")).accepted_value == {"items": [1]}
+    finally:
+        release.set()
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "accept"])
 async def test_read_deadline_exhaustion_reports_no_result(phase):
     acceptors = [StalledAcceptor(str(i), phase) for i in range(3)]
