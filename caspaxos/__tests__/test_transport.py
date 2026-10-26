@@ -231,6 +231,16 @@ class TestRemoteAcceptor:
         
         assert proxy.get_node_id() == "remote1"
     
+    def test_remote_acceptor_repr(self):
+        transport = DirectTransport()
+        east = repr(RemoteAcceptor("east-replica", transport))
+        west = repr(RemoteAcceptor("west-replica", transport))
+
+        assert "east-replica" in east
+        assert "west-replica" not in east
+        assert "west-replica" in west
+        assert "east-replica" not in west
+
 
 
 class TestTransportIntegration:

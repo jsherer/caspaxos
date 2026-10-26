@@ -250,6 +250,9 @@ recovery preserves the confirmed value. Partial-accept and cancellation tests
 also cover recovery after an earlier acknowledged write, without depending on
 private cache state.
 
+Remote proxy diagnostics are checked for the correct acceptor identity in
+`repr`, without requiring a particular punctuation format.
+
 ### Using Make (Recommended)
 
 A Makefile is provided for convenience:
