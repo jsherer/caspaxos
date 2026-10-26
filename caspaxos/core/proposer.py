@@ -32,9 +32,9 @@ class InsufficientQuorumError(Exception):
 class Proposer:
     """Coordinate consensus using one API for every acceptor configuration.
 
-    Updates on the same key are serialized. Successful accepts reserve the next
-    ballot, allowing subsequent operations to skip prepare while that cached
-    promise remains usable. Only prepare failures are automatically retried.
+    Updates on the same key are serialized locally. Each operation prepares a
+    fresh ballot so writes by other proposers are observed before applying the
+    update. Only prepare failures are automatically retried.
     """
 
     def __init__(
@@ -74,7 +74,6 @@ class Proposer:
             raise ValueError("phase_timeout must be positive and finite")
         self.phase_timeout = phase_timeout
         self.ballot_counters: Dict[str, int] = {}
-        self.cache: Dict[str, Tuple[BallotNumber, Any]] = {}
         self.locks: Dict[str, asyncio.Lock] = {}
 
     def _get_lock(self, key: str) -> asyncio.Lock:
@@ -135,13 +134,8 @@ class Proposer:
                     new_value = current_value
                 # Snapshot before request I/O can let callers mutate the result.
                 new_value = deepcopy(new_value)
-                promise = ballot.next()
-                await self._accept_phase(key, ballot, new_value, promise, extra)
+                await self._accept_phase(key, ballot, new_value, extra)
 
-                # A minority conflict may have advanced the observed frontier
-                # beyond the next promise even though this round succeeded.
-                if promise.counter > self.ballot_counters[key]:
-                    self.cache[key] = (promise, new_value)
                 if update_error is not None:
                     raise ProposerError("UpdateError", str(update_error)) from update_error
                 return deepcopy(new_value)
@@ -153,14 +147,6 @@ class Proposer:
     async def _prepare_phase(
         self, key: str, extra: Optional[Any] = None
     ) -> Tuple[BallotNumber, Optional[Any]]:
-        cached = self.cache.get(key)
-        if cached is not None:
-            ballot, value = cached
-            if ballot.counter > self.ballot_counters.get(key, 0):
-                self.ballot_counters[key] = ballot.counter
-                return ballot, value
-            self.cache.pop(key, None)
-
         # A round-local ballot cannot be changed by work on another key.
         ballot = self._next_ballot(key)
         responses = await self._wait_for_quorum(
@@ -181,17 +167,15 @@ class Proposer:
         key: str,
         ballot: BallotNumber,
         value: Any,
-        promise: BallotNumber,
         extra: Optional[Any] = None,
     ) -> None:
         # Acceptance may persist despite an error, timeout, or cancellation.
-        # Only a confirmed quorum may restore the cache for another operation.
-        self.cache.pop(key, None)
+        # Do not replay the update when its outcome cannot be confirmed.
         try:
             await self._wait_for_quorum(
                 key,
                 [
-                    acceptor.accept(AcceptRequest(key, ballot, value, promise, extra))
+                    acceptor.accept(AcceptRequest(key, ballot, value, ballot, extra))
                     for acceptor in self.acceptors
                 ],
                 lambda response: isinstance(response, AcceptResponse) and response.is_ok,

@@ -235,6 +235,46 @@ class TestRemoteAcceptor:
 
 class TestTransportIntegration:
     """Integration tests for transport with proposer."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("local_count", [3, 0, 1], ids=["local", "remote", "mixed"])
+    @pytest.mark.parametrize("scenario", ["alternating_updates", "read_after_other_writer"])
+    async def test_multiple_proposers_make_progress(self, local_count, scenario):
+        transport = DirectTransport()
+        acceptors = [BaseAcceptor(str(i), InMemoryStorage()) for i in range(3)]
+        try:
+            for acceptor in acceptors[local_count:]:
+                await transport.register_acceptor(
+                    acceptor.node_id, acceptor.prepare, acceptor.accept
+                )
+            options = {
+                "acceptors": acceptors[:local_count],
+                "transport": transport,
+                "remote_acceptor_ids": [
+                    acceptor.node_id for acceptor in acceptors[local_count:]
+                ],
+            }
+            first = Proposer("p", **options)
+            second = Proposer("q", **options)
+            if scenario == "read_after_other_writer":
+                await first.put("key", 1)
+                await second.put("key", 2)
+                assert await first.get("key") == 2
+            else:
+                calls = 0
+
+                def increment(value):
+                    nonlocal calls
+                    calls += 1
+                    return (value or 0) + 1
+
+                for expected in range(1, 21):
+                    writer = first if expected % 2 else second
+                    assert await writer.change("key", increment) == expected
+                assert calls == 20
+                assert await first.get("key") == 20
+        finally:
+            await transport.close()
     
 
     @pytest.mark.asyncio

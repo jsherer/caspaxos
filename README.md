@@ -299,7 +299,7 @@ PYTHONPATH=/app env/bin/python -m caspaxos.caspaxos.example
 
 - **Memory**: All acceptor state is in-memory by default
 - **Concurrency**: Per-key locking allows parallel operations on different keys
-- **Caching**: Proposers cache accepted values to avoid unnecessary prepare phases
+- **Protocol Rounds**: Each operation runs prepare and accept; no cached single-phase fast path
 - **Quorum**: Default majority quorum (N/2 + 1) for N acceptors
 
 ### Quorum Completion and Timeouts
@@ -327,8 +327,8 @@ finish.
 Values must support `copy.deepcopy`, including independent copies of mutable
 contents. Update functions receive detached values and may mutate and return
 them. The proposer snapshots the result before sending accept requests and
-returns a separate copy, so later caller mutations cannot change a proposal,
-the proposer cache, or accepted state.
+returns a separate copy, so later caller mutations cannot change a proposal
+or accepted state.
 
 The in-memory backend snapshots complete acceptor state on write and read,
 including ballots and nested values. Custom storage backends must provide the
@@ -357,11 +357,15 @@ deletion and clearing so queued operations keep using the same lock.
 
 ### Failed or Cancelled Writes
 
-`CASPaxos` / `Proposer` discard the cached round before sending accept requests
-and restore the cache only after a quorum succeeds and the next reserved ballot
-exceeds the observed conflict counter. If acceptance fails or the operation is
-cancelled, the next operation runs a fresh prepare phase instead of reusing the
-uncertain round's ballot for a different value.
+Every `CASPaxos` / `Proposer` operation, including `get`, prepares a fresh ballot
+and reads the accepted value from a quorum. No values or next-round promises are
+cached. This avoids stale cached ballots when proposers alternate operations on
+the same key, at the cost of a prepare phase even for repeated accesses by one
+proposer. Accept requests promise only their current round's ballot.
+
+If acceptance fails or the operation is cancelled, the next explicitly requested
+operation also prepares afresh. A competing write between prepare and accept
+can still cause an indeterminate outcome; the update is not automatically replayed.
 
 A failed or cancelled write may already have reached some acceptors; it is not
 a rollback guarantee. Retrying a non-idempotent update is not guaranteed to

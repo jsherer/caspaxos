@@ -127,7 +127,6 @@ class TestCASPaxos:
         for acceptor in paxos.acceptors:
             state = await acceptor.get_state("key")
             assert state.accepted_value == {"items": [1]}
-        # A storage-only fix must not leave the proposer's fast path aliased.
         assert await paxos.get("key") == {"items": [1]}
 
     @pytest.mark.asyncio
@@ -177,8 +176,8 @@ class TestCASPaxos:
             for node in remote_ids[-2:]:
                 await transport.unregister_acceptor(node)
             with pytest.raises(ProposerError) as error:
-                await paxos.put("key", {"value": 4})
-            assert error.value.code == "INDETERMINATE"
+                await paxos.change("key", lambda _: {"value": 4}, retries=1)
+            assert error.value.code == "MAX_RETRIES"
         finally:
             await transport.close()
 
